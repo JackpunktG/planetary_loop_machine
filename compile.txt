@@ -1,0 +1,2 @@
+gcc main.c miniaudio.c -o test -ldl -lpthread -lm
+gcc -g -O0 -Wall -Wextra main.c miniaudio.c ../arena_memory/arena_memory.c -o test -ldl -lpthread -lm

@@ -1,0 +1,1048 @@
+#include "planetary_loop_machine.h"
+
+
+uint32_t calculate_loop_frames(float bpm, uint32_t sample_rate, uint32_t beats_per_bar, uint32_t bars)
+{
+    float seconds_per_beat = 60.0f / bpm;
+    float frames_per_beat = seconds_per_beat * sample_rate;
+
+    return (uint32_t)(frames_per_beat * beats_per_bar * bars);
+}
+
+Sample* sample_F32_load(SoundController* soundController, const char* filename, uint16_t index, uint8_t beatsPerBar, uint8_t barsPerLoop, uint16_t sampleRate, uint8_t channelCount)
+{
+    ma_decoder decoder;
+    ma_decoder_config config;
+    ma_uint64 total_frame_count;
+
+    config = ma_decoder_config_init(ma_format_f32, channelCount, sampleRate);
+
+    if (ma_decoder_init_file(filename, &config, &decoder) != MA_SUCCESS)
+    {
+        printf("Failed to load file: %s\n", filename);
+        return NULL;
+    }
+
+    // Get total length in frames
+    ma_result result = ma_decoder_get_length_in_pcm_frames(&decoder, &total_frame_count);
+    if (result != MA_SUCCESS)
+    {
+        printf("Failed to get length of file: %s\n", filename);
+        ma_decoder_uninit(&decoder);
+        return NULL;
+    }
+
+    Sample* sample = arena_alloc(soundController->arena, sizeof(Sample), NULL);
+    memset(sample, 0, sizeof(Sample));
+
+    size_t t = 0;
+    sample->length = total_frame_count;
+    sample->cursor = 0;
+    sample->volume = 1.0f;
+    sample->nextSample = -1;
+    sample->newSample = true;
+    sample->index = index;
+    if (soundController->loopFrameLength == 0)
+        soundController->loopFrameLength = calculate_loop_frames(soundController->bpm, sampleRate, beatsPerBar, barsPerLoop);
+    // Allocate buffer
+    sample->buffer = arena_alloc(soundController->arena, total_frame_count * channelCount * sizeof(float), &t);
+    //printf("arena alloc %zu        \n", t);
+
+    if (sample->buffer == NULL)
+    {
+        printf("ERROR - Failed to allocate memory\n");
+        ma_decoder_uninit(&decoder);
+        return NULL;
+    }
+
+    ma_uint64 frames_read = 0;
+    result = ma_decoder_read_pcm_frames(&decoder, sample->buffer, total_frame_count, &frames_read);
+
+    if (result != MA_SUCCESS || frames_read != total_frame_count)
+        printf("WARNING: Only read %llu of %llu frames\n", frames_read, total_frame_count);
+
+    ma_decoder_uninit(&decoder);
+
+    return sample;
+}
+
+
+SoundController* sound_controller_init(float bpm, const char* loadDirectory, uint8_t beatsPerBar, uint8_t barsPerLoop, uint16_t sampleRate, uint8_t channelCount, ma_format format)
+{
+    DIR *dir;
+    struct dirent *entry;
+
+    dir = opendir(loadDirectory);
+
+    // first counting how many samples
+    uint16_t sampleCount = 0;
+    while ((entry = readdir(dir)) != NULL)
+    {
+        if (entry->d_name[0] != '.')
+            sampleCount++;
+    }
+    rewinddir(dir);
+
+    Arena* arena = arena_init(ARENA_BLOCK_SIZE, 32, false);
+    SoundController* sController = arena_alloc(arena, sizeof(SoundController), NULL);
+    memset(sController, 0, sizeof(SoundController));
+    sController->arena = arena;
+    sController->sampleCount = sampleCount;
+    sController->bpm = bpm;
+    sController->activeCount = 0;
+    sController->loopFrameLength = 0;
+    sController->globalCursor = 0;
+    sController->beatCount = 0;
+    sController->channelCount = channelCount;
+    sController->newQueued = false;
+    for(uint32_t i = 0; i < MAX_ACTIVE_SAMPLES; ++i)
+        sController->activeIndex[i] = NO_ACTIVE_SAMPLE;
+    sController->activeSamples = arena_alloc(arena, sizeof(Sample*) * 20, NULL);
+    for(uint32_t i = 0; i < 20; ++i)
+        sController->activeSamples[i] = NULL;
+    sController->samples = arena_alloc(arena, sizeof(Sample*) * sampleCount, NULL);
+
+    uint16_t i = 0;
+    while ((entry = readdir(dir)) != NULL)
+    {
+        if (entry->d_name[0] != '.')
+        {
+            char buffer[strlen(entry->d_name) + strlen(loadDirectory) + 1];
+            memcpy(buffer, loadDirectory, strlen(loadDirectory));
+            memcpy(buffer + strlen(loadDirectory), entry->d_name, strlen(entry->d_name) + 1);
+            switch(format)
+            {
+            case 5:
+                sController->samples[i] = sample_F32_load(sController, buffer, i, beatsPerBar, barsPerLoop, sampleRate, channelCount);
+                break;
+            default:
+                assert(false && "given format invalid\n");
+            }
+            strncpy(sController->samples[i++]->name, entry->d_name, strlen(entry->d_name) -4 < 32 ? strlen(entry->d_name) -4 : 31);
+        }
+    }
+
+    char formatStr[16];
+    switch(format)
+    {
+    case 5:
+        strcpy(formatStr, "32-bit float");
+        break;
+    default:
+        assert(false && "given format invalid\n");
+    }
+
+
+
+    printf("\nSuccessfully loading of session at %s - Sample rate: %u, Channels: %u, Format: %s, BPM: %0.2f, Beats per loop: %u (frames: %u)\nSamples:\n", loadDirectory, sampleRate, channelCount, formatStr,
+           sController->bpm, (beatsPerBar * barsPerLoop) /2, sController->loopFrameLength);
+    for (uint32_t j = 0; j < sController->sampleCount; ++j)
+        printf("  %s (%u Sample Count - %u length in sec)\n", sController->samples[j]->name, sController->samples[j]->length,
+               sController->samples[j]->length / sampleRate);
+
+    closedir(dir);
+
+    return sController;
+}
+
+void sound_controller_destroy(SoundController* sc)
+{
+    arena_destroy(sc->arena);
+}
+
+void data_callback_f32(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount)
+{
+    SoundController* s = (SoundController*)pDevice->pUserData;
+    if (s->activeCount == 0) return;
+
+    uint8_t count = s->activeCount;
+    Sample* activeSamples[count];
+    for (uint32_t i = 0; i < count; ++i)
+        activeSamples[i] = s->activeSamples[s->activeIndex[i]];
+
+    float* pOutputF32 = (float*)pOutput;
+    uint32_t pushedFrames = 0;
+
+    uint8_t channelCount = s->channelCount;
+    while(pushedFrames < frameCount * channelCount)
+    {
+        for(uint i = 0; i < count; ++i)
+        {
+            float volume = activeSamples[i]->volume;
+            if (!s->newQueued)
+                pOutputF32[pushedFrames] += activeSamples[i]->buffer[activeSamples[i]->cursor++] * volume;
+            else
+            {
+                if (!activeSamples[i]->newSample)
+                    pOutputF32[pushedFrames] += activeSamples[i]->buffer[activeSamples[i]->cursor++] * volume;
+                else if (s->globalCursor == 0)
+                {
+                    pOutputF32[pushedFrames] += activeSamples[i]->buffer[activeSamples[i]->cursor++] * volume;
+                    activeSamples[i]->newSample = false;
+                }
+            }
+
+            if(activeSamples[i]->cursor > activeSamples[i]->length)
+                activeSamples[i]->cursor = 0;
+            if (activeSamples[i]->nextSample >= 0 && activeSamples[i]->cursor % s->loopFrameLength == 0)// to swap in queued sample of start of the next bar
+            {
+                uint16_t index = (uint16_t)activeSamples[i]->nextSample;    // current active sample will have the nextSample set at the index of the queued sample where it appears in s->**samples
+                Sample* swap = s->samples[index];
+                s->activeSamples[swap->nextSample] = swap;      // next sample of the incomping sample is loaded with the channel
+                swap->nextSample = -1;                        // resetting next sample of the incoming sample
+                activeSamples[i] = swap;
+            }
+        }
+        ++pushedFrames;
+
+        if (s->globalCursor == 0)
+        {
+            s->newQueued = false;       //as all the queued samples would be playing due to loop around the bar, we can turn the flag off
+            s->beatCount = 1;
+            printf("\r    Loop 4/4        ");
+            fflush(stdout);
+        }
+        else if (s->globalCursor % (s->loopFrameLength /4)== 0)
+        {
+            printf("\r    Loop %u/%u        ", s->beatCount++, 4);
+            fflush(stdout);
+        }
+        else
+        {
+            printf("\r    Loop %u/%u        ", s->beatCount, 4);
+            fflush(stdout);
+        }
+        ++s->globalCursor;
+        if (s->globalCursor > s->loopFrameLength)
+            s->globalCursor = 0;
+    }
+
+    (void)pDevice;
+}
+
+
+struct termios orig_termios;
+//automaticcally called on program exit to restore terminal settings on exit
+void disable_raw_mode()
+{
+    tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
+}
+
+void enable_raw_mode()
+{
+    tcgetattr(STDIN_FILENO, &orig_termios);
+    atexit(disable_raw_mode);  // Restore on exit
+
+    struct termios raw = orig_termios;
+    raw.c_lflag &= ~(ECHO | ICANON);  // Disable echo and canonical mode
+    tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
+}
+
+void command_reset(InputController* ic)
+{
+    ic->commandIndex = 0;
+    for (uint32_t i = 0; i < MAX_COMMAND_LENGTH; ++i)
+        ic->command[i] = '\0';
+}
+
+int input_controller_init(InputController* ic, uint32_t inputDeviceIndex)
+{
+    //disabling text stream to terminal
+    enable_raw_mode();
+    char buffer[64];
+    snprintf(buffer, sizeof(buffer), "/dev/input/event%u", inputDeviceIndex);
+    printf("%s\n", buffer);
+    ic->inputFile = open(buffer, O_RDONLY | O_NONBLOCK);
+    if (ic->inputFile == -1)
+    {
+        perror("Cannot open input device");
+        return -1;
+    }
+
+    command_reset(ic);
+    return 0;
+}
+void input_controller_destroy(InputController* ic)
+{
+    close(ic->inputFile);
+}
+
+void poll_keyboard(InputController* ic)
+{
+    struct input_event ev;
+    memset (ic->keys, 0, sizeof(ic->keys));
+
+    // Drain all available events
+    while (1)
+    {
+        ssize_t bytes = read(ic->inputFile, &ev, sizeof(ev));
+
+        if (bytes == sizeof(ev))
+        {
+            // Successfully read an event
+            if (ev.type == EV_KEY && ev.code < 256)
+            {
+                if (ev.value == 1 && !ic->heldKeys[ev.code]) // Key press
+                {
+                    ic->keys[ev.code] = true;
+                    ic->heldKeys[ev.code] = true;
+                    if (ic->pollIndex < MAX_KEY_POLL)
+                        ic->keysEventPoll[ic->pollIndex++] = ev.code;
+                }
+                else if (ev.value == 0 && ic->heldKeys[ev.code]) // Key release
+                    ic->heldKeys[ev.code] = false;
+            }
+        }
+        else if (bytes == -1)
+        {
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+            {
+                // No more data - this is expected!
+                break;
+            }
+            else
+            {
+                perror("read error");
+                break;
+            }
+        }
+        else
+        {
+            // Partial read (rare) - could handle or ignore
+            break;
+        }
+    }
+}
+
+
+int command_quit(InputController* ic, SoundController* sc)
+{
+    bool active = false;
+    for (uint32_t i = 0; i < MAX_ACTIVE_SAMPLES; ++i)
+    {
+        if (sc->activeSamples[sc->activeIndex[i]] != NULL)
+        {
+            printf(BOLD_MAGENTA "\t\tWARNING: Stopping active sample on Channel %u (%s) before quitting\n" RESET, sc->activeIndex[i], sc->activeSamples[sc->activeIndex[i]]->name);
+            active = true;
+        }
+        if (active)
+            return 0;
+    }
+    return END_MISSION;
+}
+
+void command_kill_all(SoundController* sc)
+{
+    if (sc->activeCount == 0)
+    {
+        for (uint32_t i = 0; i < MAX_ACTIVE_SAMPLES; ++i)
+            if (sc->activeSamples[i] != NULL)
+                assert(false && "ERROR: active samples count is 0 but active index not cleared");
+        printf(MAGENTA "\t\tCurrently no active samples\n" RESET);
+        return;
+    }
+
+    for (uint32_t i = 0; i < MAX_ACTIVE_SAMPLES; ++i)
+    {
+        if (sc->activeSamples[i] != NULL)
+        {
+            printf(CYAN"\t\tKilling active sample on Channel %u (%s)\n" RESET, i, sc->activeSamples[i]->name);
+            sc->activeSamples[i] = NULL;
+        }
+
+        sc->activeIndex[i] = NO_ACTIVE_SAMPLE;
+    }
+    printf(BOLD_CYAN "\t\tAll active samples killed\n" RESET);
+    sc->activeCount = 0;
+}
+
+void active_channel_kill(SoundController* sc, uint8_t channel)
+{
+    if (sc->activeSamples[channel] == NULL)
+    {
+        printf(MAGENTA "\t\tWARNING: Channel %u already inactive\n" RESET, channel);
+        return;
+    }
+
+    bool found = false;
+    for (uint16_t i = 0; i < sc->activeCount; i++)
+    {
+        if (sc->activeIndex[i] == channel)
+        {
+            found = true;
+            printf(BOLD_CYAN "\t\tKilling active sample on Channel %u (%s)\n" RESET, channel, sc->activeSamples[channel]->name);
+            sc->activeSamples[channel] = NULL;
+            for (uint16_t j = i; j < sc->sampleCount; ++j)
+                sc->activeIndex[j] = sc->activeIndex[j+1];
+            break;
+        }
+    }
+    assert(found && "ERROR: active sample to kill not found in active index");
+    sc->activeIndex[sc->activeCount--] = NO_ACTIVE_SAMPLE;
+}
+
+void command_kill(InputController* ic, SoundController* sc)
+{
+    char buffer[MAX_COMMAND_LENGTH -1];
+    strcpy(buffer, ic->command +1);
+    if (strlen(buffer) == 0 || strlen(buffer) > 2)
+    {
+        printf(MAGENTA "\t\tWARNING: Invalid channel\n" RESET);
+        return;
+    }
+
+    if (strlen(buffer) == 2 && (!isdigit(buffer[0]) || !isdigit(buffer[1]) || buffer[0] == '0' ))
+    {
+        printf(MAGENTA "\t\tWARNING: Invalid channel\n" RESET);
+        return;
+    }
+    else if (strlen(buffer) == 1 &&!isdigit(buffer[0]))
+    {
+        printf(MAGENTA "\t\tWARNING: Invalid channel\n" RESET);
+        return;
+    }
+
+    int channel = atoi(buffer);
+    printf("buffer: %s, channel: %d", buffer, channel);
+    if (channel > 19 || channel < 0)
+    {
+        printf(MAGENTA "\t\tWARNING: %d is not a vaild channel\n" RESET, channel);
+        return;
+    }
+
+    switch (channel)
+    {
+    case 0:
+        active_channel_kill(sc, channel);
+        break;
+    case 1:
+        active_channel_kill(sc, channel);
+        break;
+    case 2:
+        active_channel_kill(sc, channel);
+        break;
+    case 3:
+        active_channel_kill(sc, channel);
+        break;
+    case 4:
+        active_channel_kill(sc, channel);
+        break;
+    case 5:
+        active_channel_kill(sc, channel);
+        break;
+    case 6:
+        active_channel_kill(sc, channel);
+        break;
+    case 7:
+        active_channel_kill(sc, channel);
+        break;
+    case 8:
+        active_channel_kill(sc, channel);
+        break;
+    case 9:
+        active_channel_kill(sc, channel);
+        break;
+    case 10:
+        active_channel_kill(sc, channel);
+        break;
+    case 11:
+        active_channel_kill(sc, channel);
+        break;
+    case 12:
+        active_channel_kill(sc, channel);
+        break;
+    case 13:
+        active_channel_kill(sc, channel);
+        break;
+    case 14:
+        active_channel_kill(sc, channel);
+        break;
+    case 15:
+        active_channel_kill(sc, channel);
+        break;
+    case 16:
+        active_channel_kill(sc, channel);
+        break;
+    case 17:
+        active_channel_kill(sc, channel);
+        break;
+    case 18:
+        active_channel_kill(sc, channel);
+        break;
+    case 19:
+        active_channel_kill(sc, channel);
+        break;
+    default:
+        assert(false && "ERROR: invalid channel in command_kill");
+        break;
+    }
+
+
+}
+
+void command_list(InputController* ic, SoundController* sc)
+{
+    if (strcmp(ic->command, "la") == 0)
+    {
+        for(uint8_t i = 0; i < MAX_ACTIVE_SAMPLES; ++i)
+            if (sc->activeSamples[i] != NULL)
+                printf(GREEN "\t\tChannel: %u - %s, volume: %0.2f\n" RESET, i, sc->activeSamples[i]->name, sc->activeSamples[i]->volume);
+    }
+    else if (strcmp(ic->command, "ls") == 0)
+    {
+        for (uint16_t i = 0; i < sc->sampleCount; ++i)
+        {
+            bool active = false;
+            uint8_t channel = 0;
+            for (uint8_t j = 0; j < MAX_ACTIVE_SAMPLES; ++j)
+            {
+                if (sc->samples[i] == sc->activeSamples[j])
+                {
+                    active = true;
+                    channel = j;
+                    break;
+                }
+            }
+            if (active)
+                printf(GREEN "\t\tChannel: %u %s (SampleID %u)\n" RESET, channel, sc->samples[i]->name, i);
+            else
+                printf(YELLOW "\t\tSampleID: %u - %s\n" RESET, i, sc->samples[i]->name);
+        }
+    }
+    else if (strcmp(ic->command, "li") == 0)
+    {
+        for (uint16_t i = 0; i < sc->sampleCount; ++i)
+        {
+            bool active = false;
+            uint8_t channel = 0;
+            for (uint8_t j = 0; j < MAX_ACTIVE_SAMPLES; ++j)
+            {
+                if (sc->samples[i] == sc->activeSamples[j])
+                {
+                    active = true;
+                    channel = j;
+                    break;
+                }
+            }
+            if (!active)
+                printf(BOLD_YELLOW "\t\tSampleID: %u - %s\n" RESET, i, sc->samples[i]->name);
+        }
+    }
+    else
+        printf(MAGENTA "\t\tInvaild list command ('la' - active | 'ls' - all samples)\n" RESET);
+}
+
+void parse_sample_to_channel(const char* command, uint16_t* sampleIndex, uint8_t* channel)
+{
+    char indexStr[] = {'\0', '\0', '\0'};
+    char channelStr[] = {'\0', '\0', '\0'};
+    uint8_t j = 0;
+    for (uint8_t i = 2; i < strlen(command); ++i)
+    {
+        if (isdigit(command[i]))
+        {
+            if (j < sizeof(indexStr) -1)
+                indexStr[j++] = command[i];
+            else
+            {
+                printf(MAGENTA "\t\tWARNING: Sample index too long. Command: %s\n" RESET, command);
+                *sampleIndex = 65535;
+                *channel = 255;
+                return;
+            }
+        }
+        else if(command[i] == 'c')
+        {
+            j = 0;
+            for (uint8_t k = i +1; k < strlen(command); ++k)
+                if(isdigit(command[k]))
+                {
+                    if (j < sizeof(channelStr) -1)
+                        channelStr[j++] = command[k];
+                    else
+                    {
+                        printf(MAGENTA "\t\tWARNING: Channel value too long. Command: %s\n" RESET, command);
+                        *sampleIndex = 65535;
+                        *channel = 255;
+                        return;
+                    }
+                }
+            break;
+        }
+    }
+    if (strlen(indexStr) == 0 || strlen(channelStr) == 0)
+    {
+        printf(MAGENTA "\t\tWARNING: Parsing of launch samples failed. Command: %s\n" RESET, command);
+        *sampleIndex = 65535;
+        *channel = 255;
+        return;
+    }
+    *sampleIndex = atoi(indexStr);
+    *channel = atoi(channelStr);
+}
+
+#define LAUNCH_OPTION_MUTE 'm'
+#define LAUNCH_OPTION_FADE 'f'
+#define LAUNCH_FADE_IN_TIME 12 // in sec
+
+void lauch_fade_in(InputController* ic, uint16_t index, uint8_t channel, uint8_t time)
+{
+    if(ic->sliderCount >= MAX_SLIDERS)
+    {
+        printf(MAGENTA "\t\tWARNING: Maximum number of volume sliders reached. Command: %s\n" RESET, ic->command);
+        return;
+    }
+    ic->slider[ic->sliderCount].channel = channel;
+    ic->slider[ic->sliderCount].targetVolume = 0.95f;
+    ic->slider[ic->sliderCount].framesLeft = time * 60; // assuming 60 frames per second
+    ic->slider[ic->sliderCount].active = false;
+    ic->slider[ic->sliderCount].index = index;
+    ic->sliderCount++;
+
+}
+
+void command_sample_launch(InputController* ic, SoundController* sc)
+{
+    // sl38c2m;
+    uint16_t sampleI = 0;
+    uint8_t channel = 0;
+    char option = ic->command[strlen(ic->command) -1];
+
+    parse_sample_to_channel(ic->command, &sampleI, &channel);
+    //printf("sample %u, channel %u\n", sampleI, channel);
+    if (sampleI >= sc->sampleCount || channel >= MAX_ACTIVE_SAMPLES)
+    {
+        printf(MAGENTA "\t\tWARNING: Parsing of launch samples failed. Command: %s\n" RESET, ic->command);
+        return;
+    }
+
+    for (uint8_t i = 0; i < sc->activeCount; ++i)
+    {
+        if (sc->samples[sampleI] == sc->activeSamples[i])
+        {
+            printf(MAGENTA "\t\tWARNING: Sample launch aborted - Sample %s already active\n" RESET, sc->samples[sampleI]->name);
+            return;
+        }
+    }
+
+    Sample* sample = sc->samples[sampleI];
+    sample->cursor = 0;
+    sample->nextSample = -1;
+    if (option == LAUNCH_OPTION_MUTE || option == LAUNCH_OPTION_FADE)
+        sample->volume = 0;
+    if (sc->activeSamples[channel] == NULL)
+    {
+        sample->newSample = true;
+        sc->activeSamples[channel] = sample;
+        sc->activeIndex[sc->activeCount++] = channel;
+        sc->newQueued = true;
+        if (option == LAUNCH_OPTION_FADE)
+            lauch_fade_in(ic, sampleI, channel, LAUNCH_FADE_IN_TIME);
+        printf(BOLD_GREEN "\t\tSample %s launched into channel %u\n" RESET, sample->name, channel);
+
+    }
+    else
+    {
+        sample->newSample = false;
+        sample->nextSample = channel;
+        sc->activeSamples[channel]->nextSample = sampleI;
+        if (option == LAUNCH_OPTION_FADE)
+            lauch_fade_in(ic, sampleI, channel, LAUNCH_FADE_IN_TIME);
+        printf(BOLD_GREEN "\t\tSample %s launched will be swapped at next loop into channel %u\n" RESET, sample->name, channel);
+    }
+}
+
+void command_volume_slider(InputController* ic, SoundController* sc)
+{
+    //vs0.75c2-3
+    float volume;
+    uint8_t channel;
+    uint8_t time;
+
+    int result = sscanf(ic->command, "vs%fc%hhu-%hhu", &volume, &channel, &time);
+    if (result != 3)
+    {
+        printf(MAGENTA "\t\tWARNING: Parsing of volume slider command failed. Command: %s\n" RESET, ic->command);
+        return;
+    }
+
+    if (sc->activeSamples[channel] == NULL)
+    {
+        printf(MAGENTA "\t\tWARNING: Channel %u is not active. Cannot set volume\n" RESET, channel);
+        return;
+    }
+    if (volume < 0.0f || volume > 1.0f)
+    {
+        printf(MAGENTA "\t\tWARNING: Volume out of range (0.0 - 1.0). Command: %s\n" RESET, ic->command);
+        return;
+    }
+    if (time == 0)
+    {
+        printf(MAGENTA "\t\tWARNING: Time must be greater than 0. Command: %s\n" RESET, ic->command);
+        return;
+    }
+
+    if(ic->sliderCount >= MAX_SLIDERS)
+    {
+        printf(MAGENTA "\t\tWARNING: Maximum number of volume sliders reached. Command: %s\n" RESET, ic->command);
+        return;
+    }
+
+    ic->slider[ic->sliderCount].channel = channel;
+    ic->slider[ic->sliderCount].targetVolume = volume;
+    ic->slider[ic->sliderCount].framesLeft = time * 60; // assuming 60 frames per second
+    ic->slider[ic->sliderCount].active = true;
+    ic->sliderCount++;
+
+    printf(BOLD_GREEN "\t\tVolume slider set to %0.2f on channel %u over %u frames\n" RESET, volume, channel, time * 60);
+
+}
+
+void command_volume(InputController* ic, SoundController* sc)
+{
+    //v0.75c2
+
+    char volumeStr[] = {'\0', '\0', '\0', '\0', '\0'};
+    char channelStr[] = {'\0', '\0', '\0'};
+    uint8_t j = 0;
+    for (uint8_t i = 1; i < strlen(ic->command); ++i)
+    {
+        if (isdigit(ic->command[i]) || ic->command[i] == '.')
+        {
+            if (j < sizeof(volumeStr) -1)
+                volumeStr[j++] = ic->command[i];
+            else
+            {
+                printf(MAGENTA "\t\tWARNING: Volume value too long. Command: %s\n" RESET, ic->command);
+                return;
+            }
+        }
+        else if(ic->command[i] == 'c')
+        {
+            j = 0;
+            for (uint8_t k = i +1; k < strlen(ic->command); ++k)
+                if(isdigit(ic->command[k]))
+                {
+                    if (j < sizeof(channelStr) -1)
+                        channelStr[j++] = ic->command[k];
+                    else
+                    {
+                        printf(MAGENTA "\t\tWARNING: Channel value too long. Command: %s\n" RESET, ic->command);
+                        return;
+                    }
+                }
+            break;
+        }
+    }
+    if (strlen(volumeStr) == 0 || strlen(channelStr) == 0)
+    {
+        printf(MAGENTA "\t\tWARNING: Parsing of volume command failed. Command: %s\n" RESET, ic->command);
+        return;
+    }
+    float volume = atof(volumeStr);
+    uint8_t channel = atoi(channelStr);
+
+    if (sc->activeSamples[channel] == NULL)
+    {
+        printf(MAGENTA "\t\tWARNING: Channel %u is not active. Cannot set volume\n" RESET, channel);
+        return;
+    }
+    if (volume < 0.0f || volume > 1.0f)
+    {
+        printf(MAGENTA "\t\tWARNING: Volume out of range (0.0 - 1.0). Command: %s\n" RESET, ic->command);
+        return;
+    }
+    sc->activeSamples[channel]->volume = volume;
+    printf(BOLD_GREEN "\t\tVolume of channel %u set to %0.2f\n" RESET, channel, volume);
+}
+
+int fire_command(InputController* ic, SoundController* sc);
+void command_multi(InputController* ic, SoundController* sc)
+{
+    // mul;sl38c2;vs0.5c2-3;k2;
+    if (strncmp(ic->command, "mul;", 4) != 0)
+    {
+        printf(MAGENTA "\t\tWARNING: Invalid multi command. Command: %s\n" RESET, ic->command);
+        return;
+    }
+    // mul;cmd1;cmd2;cmd3...
+    char buffer[strlen(ic->command) -4 +1];
+    strcpy(buffer, ic->command +4);
+    if (buffer[strlen(buffer) -1] == ';')
+        buffer[strlen(buffer) -1] = '\0';
+    printf("buffer: %s - before:%s\n", buffer, ic->command);
+
+    char* commandStr = strtok(buffer, ";");
+    while (commandStr != NULL)
+    {
+        strncpy(ic->command, commandStr, MAX_COMMAND_LENGTH -1);
+        ic->commandIndex = strlen(commandStr);
+        printf(BLUE "\t\tMulti Command Fired: %s\n" RESET, ic->command);
+        fire_command(ic, sc);
+        commandStr = strtok(NULL, ";");
+    }
+
+}
+
+
+int fire_command(InputController* ic, SoundController* sc)
+{
+    if(ic->commandIndex == 0)
+        return 0;
+
+    int result = 0;
+
+    switch(ic->command[0])
+    {
+    case 'q':
+        if (strcmp(ic->command, "quit") == 0)
+            result = command_quit(ic, sc);
+        break;
+    case 'k':
+        if (strcmp(ic->command, "killall") == 0)
+            command_kill_all(sc);
+        else
+            command_kill(ic, sc);
+        break;
+    case 'l':
+        command_list(ic, sc);
+        break;
+    case 's':
+        if (ic->command[1] == 'l')
+            command_sample_launch(ic, sc);
+        break;
+    case 'm':
+        command_multi(ic, sc);
+        break;
+    case 'v':
+        if (ic->command[1] == 's')
+            command_volume_slider(ic, sc);
+        else
+            command_volume(ic, sc);
+        break;
+
+
+    }
+
+    command_reset(ic);
+    return result;
+}
+
+void tab_info(InputController* ic, SoundController* s)
+{
+    uint32_t commandLength = strlen(ic->command);
+    uint8_t commandIndex = ic->commandIndex;
+    char command[commandLength +1];
+    strcpy(command, ic->command);
+    printf("command inputted: %s\n", command);
+
+    uint32_t i = 0;
+    uint8_t numberCount = 0;
+    bool next = true;
+    while(command[ i ] != '\0')
+    {
+        if (isdigit(command[i]) && next)
+        {
+            numberCount++;
+            next = false;
+        }
+        else if (command[i] == 'k')  // to account for killing only having one digit in command
+            numberCount++;
+        else if (isalpha(command[i]) && !next)
+            next = true;
+
+        ++i;
+    }
+
+    command_reset(ic);
+    printf("%u\n", numberCount);
+    if (numberCount == 0 || numberCount % 2 == 0)
+    {
+        if (command[commandLength -1] == 'l' || command[commandLength -1] == 's')
+            strcpy(ic->command, "li");
+        else
+            strcpy(ic->command, "la");
+    }
+    else
+        strcpy(ic->command, "la");
+
+    ic->commandIndex = 2;
+    printf("new command: %s\n", ic->command);
+    fire_command(ic, s);
+
+    ic->commandIndex = commandIndex;
+    strcpy(ic->command, command);
+}
+
+char get_char_from_linux_key(uint8_t value)
+{
+    switch(value)
+    {
+    case KEY_A:
+        return 'a';
+    case KEY_C:
+        return 'c';
+    case KEY_Q:
+        return 'q';
+    case KEY_T:
+        return 't';
+    case KEY_U:
+        return 'u';
+    case KEY_I:
+        return 'i';
+    case KEY_S:
+        return 's';
+    case KEY_O:
+        return 'o';
+    case KEY_F:
+        return 'f';
+    case KEY_P:
+        return 'p';
+    case KEY_L:
+        return 'l';
+    case KEY_K:
+        return 'k';
+    case KEY_V:
+        return 'v';
+    case KEY_M:
+        return 'm';
+    case KEY_MINUS:
+        return '-';
+    case KEY_DOT:
+        return '.';
+    case KEY_SEMICOLON:
+        return ';';
+    case KEY_1:
+        return '1';
+    case KEY_D:
+        return 'd';
+    case KEY_2:
+        return '2';
+    case KEY_3:
+        return '3';
+    case KEY_4:
+        return '4';
+    case KEY_5:
+        return '5';
+    case KEY_6:
+        return '6';
+    case KEY_7:
+        return '7';
+    case KEY_8:
+        return '8';
+    case KEY_9:
+        return '9';
+    case KEY_0:
+        return '0';
+
+    default:
+        return '\0';
+    }
+}
+
+bool build_command(InputController* ic, uint8_t index)
+{
+    ic->command[ic->commandIndex] = get_char_from_linux_key(ic->keysEventPoll[index]);
+    if(ic->command[ic->commandIndex] != '\0')
+    {
+        ++ic->commandIndex;
+        return true;
+    }
+    else
+        return false;
+
+}
+
+int input_process(InputController* ic, SoundController* s)
+{
+    if (ic->pollIndex == 0)
+        return 0;
+
+    int result = 0;
+    for (uint8_t i = 0; i < ic->pollIndex; ++i)
+    {
+        switch (ic->keysEventPoll[i])
+        {
+        case KEY_ENTER:
+            printf(BLUE "Command Fired: %s\n" RESET, ic->command);
+            result = fire_command(ic, s);
+            break;
+        case KEY_ESC:
+            if (ic->commandIndex > 0)
+            {
+                command_reset(ic);
+                printf("Command reset\n");
+            }
+            break;
+        case KEY_TAB:
+            if (ic->commandIndex > 0)
+                tab_info(ic, s);
+            break;
+        case KEY_BACKSPACE:
+            if (ic->commandIndex > 0)
+            {
+                ic->command[--ic->commandIndex] = '\0';
+                printf("%s\n", ic->command);
+            }
+            break;
+        default:
+            if (build_command(ic, i))
+                printf("%s\n", ic->command);
+            break;
+
+
+        }
+
+
+    }
+    ic->pollIndex = 0;
+
+    return result;
+}
+
+void slider_update(InputController* ic, SoundController* sc)
+{
+    if (ic->sliderCount == 0)
+        return;
+
+    for (uint8_t i = 0; i < ic->sliderCount; ++i)
+    {
+        uint8_t channel = ic->slider[i].channel;
+        if (!ic->slider[i].active)
+        {
+            // Check if the sample has been swaped it
+            if (sc->activeSamples[channel] == sc->samples[ic->slider[i].index])
+            {
+                printf(BOLD_GREEN "\t\tSlider on channel %u activated after sample swap\n" RESET, channel);
+                ic->slider[i].active = true;
+            }
+            continue;
+        }
+        else if (ic->slider[i].active && sc->activeSamples[channel] == NULL)
+        {
+            printf(MAGENTA "\t\tWARNING: Channel %u is not active. Slider reset\n" RESET, channel);
+            ic->slider[i] = ic->slider[--ic->sliderCount];
+            --i;
+            continue;
+        }
+
+        float targetVolume = ic->slider[i].targetVolume;
+        uint16_t framesLeft = ic->slider[i].framesLeft;
+
+        float currentVolume = sc->activeSamples[channel]->volume;
+        float volumeStep = (targetVolume - currentVolume) / framesLeft;
+
+        sc->activeSamples[channel]->volume += volumeStep;
+        ic->slider[i].framesLeft--;
+        //  printf("\r\t\tChannel %u volume: %0.2f (target: %0.2f)       \n", channel, sc->activeSamples[channel]->volume, targetVolume);
+
+        if (ic->slider[i].framesLeft == 0)
+        {
+            sc->activeSamples[channel]->volume = targetVolume;
+            // Remove this slider
+            ic->slider[i] = ic->slider[--ic->sliderCount];
+            --i;
+        }
+    }
+}
+

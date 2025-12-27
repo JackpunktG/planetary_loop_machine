@@ -1,0 +1,124 @@
+#include "../../lib/mini_audio/miniaudio.h"
+#include "../../lib/arena_memory/arena_memory.h"
+#include <stdlib.h>
+#include <stdio.h>
+#include <dirent.h>
+#include <stdbool.h>
+#include <unistd.h>
+#include <stdint.h>
+#include <string.h>
+#include <linux/input.h>
+#include <fcntl.h>
+#include <linux/input-event-codes.h>
+#include <errno.h>
+#include <termios.h>
+#include <assert.h>
+#include <ctype.h>
+
+#define END_MISSION -99
+#define MA_DEBUG_OUTPUT
+//#define SAMPLE_FORMAT   ma_format_f32 // 32-bit float format
+//#define CHANNEL_COUNT   2
+//#define SAMPLE_RATE     44100
+//#define BEATS_PER_BAR  4
+//#define BARS_PER_LOOP  2     // most electronic music when we talk bpm its 2 beats(on 1 & 3) per bar so to loop every 4 beats its 2 bars
+// looping every 8 beats would be 4 bars, 16 beats = 8 bars, etc....
+
+
+/* Sound Controller and Sample */
+
+typedef struct
+{
+    float* buffer;
+    uint32_t length;
+    uint32_t cursor;
+    short nextSample;
+    bool newSample;
+    /* 1 byte hole */
+    uint16_t index; //index in **samples
+    char name[30];
+    float volume;
+} Sample;
+
+#define MAX_ACTIVE_SAMPLES 20
+#define NO_ACTIVE_SAMPLE -25
+
+typedef struct
+{
+    Arena* arena;
+    Sample** activeSamples;
+    short activeIndex[MAX_ACTIVE_SAMPLES];
+    Sample** samples;
+    uint16_t sampleCount;
+    uint8_t activeCount;
+    uint8_t beatCount;
+    uint32_t loopFrameLength; //4 beat timer for swapping samples or bring in queued samples
+    uint32_t globalCursor;
+    bool newQueued;
+    uint8_t channelCount;
+    float bpm;
+    /* 3 byte padding */
+} SoundController;
+
+//Only vaild format is f32 thus far
+SoundController* sound_controller_init(float bpm, const char* loadDirectory, uint8_t beatsPerBar, uint8_t barsPerLoop, uint16_t sampleRate, uint8_t channelCount, ma_format format);
+void data_callback_f32(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount);
+void sound_controller_destroy(SoundController* sc);
+
+
+/* Input Controller and UI */
+
+// ANSI color codes
+#define RESET   "\033[0m"
+#define BLACK   "\033[30m"
+#define RED     "\033[31m"
+#define GREEN   "\033[32m"
+#define YELLOW  "\033[33m"
+#define BLUE    "\033[34m"
+#define MAGENTA "\033[35m"
+#define CYAN    "\033[36m"
+#define WHITE   "\033[37m"
+// Bold colors
+#define BOLD_BLACK   "\033[1;30m"
+#define BOLD_RED     "\033[1;31m"
+#define BOLD_GREEN   "\033[1;32m"
+#define BOLD_YELLOW  "\033[1;33m"
+#define BOLD_BLUE    "\033[1;34m"
+#define BOLD_MAGENTA "\033[1;35m"
+#define BOLD_CYAN    "\033[1;36m"
+#define BOLD_WHITE   "\033[1;37m"
+
+#define MAX_KEY_POLL 7
+#define MAX_COMMAND_LENGTH 63
+
+#define MAX_SLIDERS 8
+
+typedef struct
+{
+    bool heldKeys[256];
+    bool keys[256];
+    uint8_t keysEventPoll[MAX_KEY_POLL];
+    uint8_t pollIndex;
+    char command[MAX_COMMAND_LENGTH];
+    uint8_t commandIndex;
+    int inputFile;
+    uint8_t sliderCount;
+    /* 3 byte hole */
+    struct
+    {
+        uint8_t channel;
+        bool active;
+        uint16_t index;
+        float targetVolume;
+        uint16_t framesLeft;
+    } slider[MAX_SLIDERS];
+} InputController;
+
+// passing in the pointer to allow stac allocation
+int input_controller_init(InputController* ic, uint32_t inputDeviceIndex);
+void input_controller_destroy(InputController* ic);
+
+// the three fuctions called in main loop
+void poll_keyboard(InputController* ic);
+int input_process(InputController* ic, SoundController* s);
+void slider_update(InputController* ic, SoundController* sc);
