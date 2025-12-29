@@ -9,6 +9,5 @@ Currently all sample are required to be the same BPM. Transitions can be set to 
 
 #### To Come
 - Multi-engine allowing you to listen to sample on another output before launching
-- "one shotters" samples that don't loop and just end after their duration
 - effects
 - better UI layout and commands 

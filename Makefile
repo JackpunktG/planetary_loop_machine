@@ -1,6 +1,6 @@
 # Compiler and flags
 CC = gcc
-CFLAGS = -Wall -Wextra -g -Ilib/arena_memory -Ilib/mini_audio -Isrc/planetary_loop_machine
+CFLAGS = -Wall -Wextra -g -O0 -Ilib/arena_memory -Ilib/mini_audio -Isrc/planetary_loop_machine
 LDFLAGS = -lpthread -lm -ldl
 
 # Directories

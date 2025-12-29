@@ -41,6 +41,7 @@ Sample* sample_F32_load(SoundController* soundController, const char* filename, 
     sample->volume = 1.0f;
     sample->nextSample = -1;
     sample->newSample = true;
+    sample->oneShot = false;
     sample->index = index;
     if (soundController->loopFrameLength == 0)
         soundController->loopFrameLength = calculate_loop_frames(soundController->bpm, sampleRate, beatsPerBar, barsPerLoop);
@@ -93,13 +94,17 @@ SoundController* sound_controller_init(float bpm, const char* loadDirectory, uin
     sController->loopFrameLength = 0;
     sController->globalCursor = 0;
     sController->beatCount = 0;
+    sController->oneShotCount = 0;
     sController->channelCount = channelCount;
     sController->newQueued = false;
     for(uint32_t i = 0; i < MAX_ACTIVE_SAMPLES; ++i)
         sController->activeIndex[i] = NO_ACTIVE_SAMPLE;
-    sController->activeSamples = arena_alloc(arena, sizeof(Sample*) * 20, NULL);
-    for(uint32_t i = 0; i < 20; ++i)
+    sController->activeSamples = arena_alloc(arena, sizeof(Sample*) * MAX_ACTIVE_SAMPLES, NULL);
+    for(uint32_t i = 0; i < MAX_ACTIVE_SAMPLES; ++i)
         sController->activeSamples[i] = NULL;
+    sController->oneShotActive = arena_alloc(arena, sizeof(Sample*) * MAX_ACTIVE_ONE_SHOT, NULL);
+    for(uint32_t i = 0; i < MAX_ACTIVE_ONE_SHOT; ++i)
+        sController->oneShotActive[i] = NULL;
     sController->samples = arena_alloc(arena, sizeof(Sample*) * sampleCount, NULL);
 
     uint16_t i = 0;
@@ -153,12 +158,16 @@ void sound_controller_destroy(SoundController* sc)
 void data_callback_f32(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount)
 {
     SoundController* s = (SoundController*)pDevice->pUserData;
-    if (s->activeCount == 0) return;
+    if (s->activeCount == 0 && s->oneShotCount == 0) return;
 
     uint8_t count = s->activeCount;
-    Sample* activeSamples[count];
-    for (uint32_t i = 0; i < count; ++i)
+    uint8_t oneShotCount = s->oneShotCount;
+    Sample* activeSamples[count + oneShotCount];
+    for (uint8_t i = 0; i < count; ++i)
         activeSamples[i] = s->activeSamples[s->activeIndex[i]];
+    //One shot
+    for (uint8_t i = 0; i < oneShotCount; ++i)
+        activeSamples[count++] = s->oneShotActive[i];
 
     float* pOutputF32 = (float*)pOutput;
     uint32_t pushedFrames = 0;
@@ -169,28 +178,49 @@ void data_callback_f32(ma_device* pDevice, void* pOutput, const void* pInput, ma
         for(uint i = 0; i < count; ++i)
         {
             float volume = activeSamples[i]->volume;
-            if (!s->newQueued)
-                pOutputF32[pushedFrames] += activeSamples[i]->buffer[activeSamples[i]->cursor++] * volume;
-            else
+            if (!activeSamples[i]->oneShot)
             {
-                if (!activeSamples[i]->newSample)
+                if (!s->newQueued)
                     pOutputF32[pushedFrames] += activeSamples[i]->buffer[activeSamples[i]->cursor++] * volume;
-                else if (s->globalCursor == 0)
+                else
                 {
-                    pOutputF32[pushedFrames] += activeSamples[i]->buffer[activeSamples[i]->cursor++] * volume;
-                    activeSamples[i]->newSample = false;
+                    if (!activeSamples[i]->newSample)
+                        pOutputF32[pushedFrames] += activeSamples[i]->buffer[activeSamples[i]->cursor++] * volume;
+                    else if (s->globalCursor == 0)
+                    {
+                        pOutputF32[pushedFrames] += activeSamples[i]->buffer[activeSamples[i]->cursor++] * volume;
+                        activeSamples[i]->newSample = false;
+                    }
+                }
+
+                if(activeSamples[i]->cursor > activeSamples[i]->length)
+                    activeSamples[i]->cursor = 0;
+                if (activeSamples[i]->nextSample >= 0 && activeSamples[i]->cursor % s->loopFrameLength == 0)// to swap in queued sample of start of the next bar
+                {
+                    uint16_t index = (uint16_t)activeSamples[i]->nextSample;    // current active sample will have the nextSample set at the index of the queued sample where it appears in s->**samples
+                    Sample* swap = s->samples[index];
+                    s->activeSamples[swap->nextSample] = swap;      // next sample of the incomping sample is loaded with the channel
+                    swap->nextSample = -1;                        // resetting next sample of the incoming sample
+                    activeSamples[i] = swap;
                 }
             }
-
-            if(activeSamples[i]->cursor > activeSamples[i]->length)
-                activeSamples[i]->cursor = 0;
-            if (activeSamples[i]->nextSample >= 0 && activeSamples[i]->cursor % s->loopFrameLength == 0)// to swap in queued sample of start of the next bar
+            else //One Shot
             {
-                uint16_t index = (uint16_t)activeSamples[i]->nextSample;    // current active sample will have the nextSample set at the index of the queued sample where it appears in s->**samples
-                Sample* swap = s->samples[index];
-                s->activeSamples[swap->nextSample] = swap;      // next sample of the incomping sample is loaded with the channel
-                swap->nextSample = -1;                        // resetting next sample of the incoming sample
-                activeSamples[i] = swap;
+                if(activeSamples[i]->cursor > activeSamples[i]->length)
+                    continue;
+
+                if (!s->newQueued)
+                    pOutputF32[pushedFrames] += activeSamples[i]->buffer[activeSamples[i]->cursor++] * volume;
+                else
+                {
+                    if (!activeSamples[i]->newSample)
+                        pOutputF32[pushedFrames] += activeSamples[i]->buffer[activeSamples[i]->cursor++] * volume;
+                    else if (s->globalCursor == 0)
+                    {
+                        pOutputF32[pushedFrames] += activeSamples[i]->buffer[activeSamples[i]->cursor++] * volume;
+                        activeSamples[i]->newSample = false;
+                    }
+                }
             }
         }
         ++pushedFrames;
@@ -486,13 +516,16 @@ void command_list(InputController* ic, SoundController* sc)
     {
         for(uint8_t i = 0; i < MAX_ACTIVE_SAMPLES; ++i)
             if (sc->activeSamples[i] != NULL)
-                printf(GREEN "\t\tChannel: %u - %s, volume: %0.2f\n" RESET, i, sc->activeSamples[i]->name, sc->activeSamples[i]->volume);
+                printf(BOLD_GREEN "\t\tChannel: %u - %s, volume: %0.2f\n" RESET, i, sc->activeSamples[i]->name, sc->activeSamples[i]->volume);
+        for(uint8_t i = 0; i < sc->oneShotCount; ++i)
+            printf(GREEN "\t\tOne Shot: %u - %s, volume: %0.2f\n" RESET, i, sc->activeSamples[i]->name, sc->activeSamples[i]->volume);
     }
     else if (strcmp(ic->command, "ls") == 0)
     {
         for (uint16_t i = 0; i < sc->sampleCount; ++i)
         {
             bool active = false;
+            bool oneShot = false;
             uint8_t channel = 0;
             for (uint8_t j = 0; j < MAX_ACTIVE_SAMPLES; ++j)
             {
@@ -503,10 +536,21 @@ void command_list(InputController* ic, SoundController* sc)
                     break;
                 }
             }
+            for (uint8_t j = 0; j < sc->oneShotCount; ++j)
+            {
+                if (sc->samples[i] == sc->oneShotActive[j])
+                {
+                    oneShot = true;
+                    break;
+                }
+            }
+
             if (active)
-                printf(GREEN "\t\tChannel: %u %s (SampleID %u)\n" RESET, channel, sc->samples[i]->name, i);
+                printf(BOLD_GREEN "\t\tChannel: %u %s (SampleID %u)\n" RESET, channel, sc->samples[i]->name, i);
+            else if (oneShot)
+                printf(GREEN "\t\tOne Shot active: %s (SampleID %u)\n" RESET, sc->samples[i]->name, i);
             else
-                printf(YELLOW "\t\tSampleID: %u - %s\n" RESET, i, sc->samples[i]->name);
+                printf(BOLD_YELLOW "\t\tSampleID: %u - %s\n" RESET, i, sc->samples[i]->name);
         }
     }
     else if (strcmp(ic->command, "li") == 0)
@@ -514,6 +558,7 @@ void command_list(InputController* ic, SoundController* sc)
         for (uint16_t i = 0; i < sc->sampleCount; ++i)
         {
             bool active = false;
+            bool oneShot = false;
             uint8_t channel = 0;
             for (uint8_t j = 0; j < MAX_ACTIVE_SAMPLES; ++j)
             {
@@ -524,7 +569,16 @@ void command_list(InputController* ic, SoundController* sc)
                     break;
                 }
             }
-            if (!active)
+            for (uint8_t j = 0; j < sc->oneShotCount; ++j)
+            {
+                if (sc->samples[i] == sc->oneShotActive[j])
+                {
+                    oneShot = true;
+                    break;
+                }
+            }
+
+            if (!active && !oneShot)
                 printf(BOLD_YELLOW "\t\tSampleID: %u - %s\n" RESET, i, sc->samples[i]->name);
         }
     }
@@ -537,7 +591,7 @@ void parse_sample_to_channel(const char* command, uint16_t* sampleIndex, uint8_t
     char indexStr[] = {'\0', '\0', '\0'};
     char channelStr[] = {'\0', '\0', '\0'};
     uint8_t j = 0;
-    for (uint8_t i = 2; i < strlen(command); ++i)
+    for (uint8_t i = 1; i < strlen(command); ++i)
     {
         if (isdigit(command[i]))
         {
@@ -601,9 +655,58 @@ void lauch_fade_in(InputController* ic, uint16_t index, uint8_t channel, uint8_t
 
 }
 
+void command_one_shot(InputController* ic, SoundController* sc)
+{
+    // o38;
+    // o<sample index>;
+    if (sc->oneShotCount >= MAX_ACTIVE_ONE_SHOT)
+    {
+        printf(MAGENTA "\t\tWARNING: Maximum of shot shot samples currently active\n" RESET);
+        return;
+    }
+
+    for (uint32_t i = 1; i < strlen(ic->command); ++i)
+        if (!isdigit(ic->command[i]))
+        {
+            printf(MAGENTA "\t\tWARNING: Parsing of oneshot command found unvaild sample index. Command: %s\n" RESET, ic->command);
+            return;
+        }
+    char tmp[strlen(ic->command)];
+    strcpy(tmp, ic->command +1);
+    uint16_t sampleI = atoi(tmp);
+    printf("[DEBUG] tmp: %s, sampleI: %u\n", tmp,  sampleI);
+
+    if (sc->sampleCount <=  sampleI)
+    {
+        printf(MAGENTA "\t\tWARNING: Sample Index out of range %u\n" RESET, sampleI);
+        return;
+    }
+
+    for (uint8_t i = 0; i < sc->activeCount; ++i)
+    {
+        if (sc->samples[sampleI] == sc->activeSamples[i])
+        {
+            printf(MAGENTA "\t\tWARNING: One shot launch aborted - Sample %s already active\n" RESET, sc->samples[sampleI]->name);
+            return;
+        }
+    }
+
+    Sample* sample = sc->samples[sampleI];
+    sample->cursor = 0;
+    sample->nextSample = -1;
+    sample->oneShot = true;
+    sample->volume = 1;
+    sample->newSample = true;
+
+    sc->oneShotActive[sc->oneShotCount++] = sample;
+    sc->newQueued = true;
+    printf(BOLD_GREEN "\t\tSample %s engaged for one shot\n" RESET, sample->name);
+}
+
 void command_sample_launch(InputController* ic, SoundController* sc)
 {
-    // sl38c2m;
+    // l38c2m;
+    // l<sample index>c<channel><option>;
     uint16_t sampleI = 0;
     uint8_t channel = 0;
     char option = ic->command[strlen(ic->command) -1];
@@ -770,7 +873,7 @@ void command_multi(InputController* ic, SoundController* sc)
     strcpy(buffer, ic->command +4);
     if (buffer[strlen(buffer) -1] == ';')
         buffer[strlen(buffer) -1] = '\0';
-    printf("buffer: %s - before:%s\n", buffer, ic->command);
+    //printf("[DEBUG] buffer: %s - before:%s\n", buffer, ic->command);
 
     char* commandStr = strtok(buffer, ";");
     while (commandStr != NULL)
@@ -805,11 +908,13 @@ int fire_command(InputController* ic, SoundController* sc)
             command_kill(ic, sc);
         break;
     case 'l':
-        command_list(ic, sc);
-        break;
-    case 's':
-        if (ic->command[1] == 'l')
+        if (isdigit(ic->command[1]))
             command_sample_launch(ic, sc);
+        else
+            command_list(ic, sc);
+        break;
+    case 'o':
+        command_one_shot(ic, sc);
         break;
     case 'm':
         command_multi(ic, sc);
@@ -834,9 +939,10 @@ void tab_info(InputController* ic, SoundController* s)
     uint8_t commandIndex = ic->commandIndex;
     char command[commandLength +1];
     strcpy(command, ic->command);
-    printf("command inputted: %s\n", command);
+    //printf("[DEBUG] command inputted: %s\n", command);
 
-    uint32_t i = 0;
+    /* To Complicated when we only how inactive samples before launching...
+       int32_t i = 0;
     uint8_t numberCount = 0;
     bool next = true;
     while(command[ i ] != '\0')
@@ -858,16 +964,22 @@ void tab_info(InputController* ic, SoundController* s)
     printf("%u\n", numberCount);
     if (numberCount == 0 || numberCount % 2 == 0)
     {
-        if (command[commandLength -1] == 'l' || command[commandLength -1] == 's')
+        if (command[commandLength -1] == 'l' || command[commandLength -1] == 'o')
             strcpy(ic->command, "li");
         else
             strcpy(ic->command, "la");
     }
     else
         strcpy(ic->command, "la");
+        */
+
+    if (command[commandLength -1] == 'l' || command[commandLength -1] == 'o')
+        strcpy(ic->command, "li");
+    else
+        strcpy(ic->command, "la");
 
     ic->commandIndex = 2;
-    printf("new command: %s\n", ic->command);
+    //printf("[DEBUG] new command: %s\n", ic->command);
     fire_command(ic, s);
 
     ic->commandIndex = commandIndex;
@@ -1046,3 +1158,20 @@ void slider_update(InputController* ic, SoundController* sc)
     }
 }
 
+void one_shot_check(SoundController* sc)
+{
+    if(sc->oneShotCount == 0)
+        return;
+
+    for (uint8_t i = 0; i < sc->oneShotCount; ++i)
+    {
+        Sample* sample = sc->oneShotActive[i];
+        if (sample->cursor > sample->length)
+        {
+            //swaping with the most recently activated one shot sample
+            sc->oneShotActive[i] = sc->oneShotActive[--sc->oneShotCount];
+            sample->oneShot = false;
+            //printf("[DEBUG] oneshot %u is reset. Active one shots: %u\n", i, sc->oneShotCount);
+        }
+    }
+}

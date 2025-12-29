@@ -34,7 +34,7 @@ typedef struct
     uint32_t cursor;
     short nextSample;
     bool newSample;
-    /* 1 byte hole */
+    bool oneShot;
     uint16_t index; //index in **samples
     char name[30];
     float volume;
@@ -42,12 +42,16 @@ typedef struct
 
 #define MAX_ACTIVE_SAMPLES 20
 #define NO_ACTIVE_SAMPLE -25
+#define MAX_ACTIVE_ONE_SHOT 5
 
 typedef struct
 {
-    Arena* arena;
     Sample** activeSamples;
     short activeIndex[MAX_ACTIVE_SAMPLES];
+    Sample** oneShotActive;
+    uint8_t oneShotCount;
+    /* 3 byte hole */
+    float bpm;
     Sample** samples;
     uint16_t sampleCount;
     uint8_t activeCount;
@@ -56,8 +60,8 @@ typedef struct
     uint32_t globalCursor;
     bool newQueued;
     uint8_t channelCount;
-    float bpm;
-    /* 3 byte padding */
+    /* 2 byte hole */
+    Arena* arena;
 } SoundController;
 
 //Only vaild format is f32 thus far
@@ -65,6 +69,8 @@ SoundController* sound_controller_init(float bpm, const char* loadDirectory, uin
 void data_callback_f32(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount);
 void sound_controller_destroy(SoundController* sc);
 
+//ran each loop to check status of one shot launched samples and reset their settings
+void one_shot_check(SoundController* sc);
 
 /* Input Controller and UI */
 

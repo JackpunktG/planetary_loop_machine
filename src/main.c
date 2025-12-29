@@ -58,7 +58,7 @@ int main(int argc, char** argv)
     }
     */
     InputController ic = {0};
-    int i = input_controller_init(&ic, 20);
+    int i = input_controller_init(&ic, 11 );
     printf("%d\n", i);
     SoundController* s = sound_controller_init(122, "src/audio_data/song_1/", 4, 2, SAMPLE_RATE, CHANNEL_COUNT, SAMPLE_FORMAT);
     s->activeCount = 0;
@@ -68,7 +68,7 @@ int main(int argc, char** argv)
     ma_device_config deviceConfig;
 
     deviceConfig = ma_device_config_init(ma_device_type_playback);
-    deviceConfig.playback.pDeviceID = &pPlaybackInfos[0].id;
+    deviceConfig.playback.pDeviceID = &pPlaybackInfos[1].id;
     deviceConfig.playback.format   = SAMPLE_FORMAT;
     deviceConfig.playback.channels = CHANNEL_COUNT;
     deviceConfig.sampleRate        = SAMPLE_RATE;
@@ -117,6 +117,7 @@ int main(int argc, char** argv)
             running = false;
 
         slider_update(&ic, s);
+        one_shot_check(s);
 
         sanity_checks(s, &ic);
 
