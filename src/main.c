@@ -58,17 +58,35 @@ int main(int argc, char** argv)
     }
     */
     InputController ic = {0};
-    int i = input_controller_init(&ic, 11 );
+    int i = input_controller_init(&ic, 11);
     printf("%d\n", i);
-    SoundController* s = sound_controller_init(122, "src/audio_data/song_1/", 4, 2, SAMPLE_RATE, CHANNEL_COUNT, SAMPLE_FORMAT);
+    SoundController* s = sound_controller_init(122, "src/audio_data/song_1/", 4, 2, SAMPLE_RATE, CHANNEL_COUNT, SAMPLE_FORMAT, true);
     s->activeCount = 0;
+
+    synth_generate_audio(s->synth);
+
+    /*
+    FILE* file = fopen("sample_val.cvs", "a");
+    for (int i = 0; i < s->samples[1]->length; ++i)
+    {
+        for (int j = -1; j < s->sampleCount; ++j)
+        {
+            fprintf(file, "%f,", (j == -1) ? s->synth->buffer[i] : s->samples[j]->buffer[i]);
+        }
+        fprintf(file, "\n");
+    }
+    fclose(file);
+    sound_controller_destroy(s);
+    input_controller_destroy(&ic);
+    return 0;
+    */
 
     ma_result result;
     ma_device device;
     ma_device_config deviceConfig;
 
     deviceConfig = ma_device_config_init(ma_device_type_playback);
-    deviceConfig.playback.pDeviceID = &pPlaybackInfos[1].id;
+    deviceConfig.playback.pDeviceID = &pPlaybackInfos[0].id;
     deviceConfig.playback.format   = SAMPLE_FORMAT;
     deviceConfig.playback.channels = CHANNEL_COUNT;
     deviceConfig.sampleRate        = SAMPLE_RATE;
@@ -111,6 +129,7 @@ int main(int argc, char** argv)
     bool running = true;
     while (running)
     {
+        synth_generate_audio(s->synth);
         poll_keyboard(&ic);
 
         if (input_process(&ic, s) == END_MISSION)

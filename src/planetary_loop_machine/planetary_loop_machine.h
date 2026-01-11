@@ -25,6 +25,24 @@
 // looping every 8 beats would be 4 bars, 16 beats = 8 bars, etc....
 
 
+typedef struct
+{
+    float* buffer;
+    uint32_t cursor;
+    uint32_t cursorMax; //amount of generated audio ready to be used
+    uint32_t bufferMax;
+    uint16_t sampleRate;
+    float volume;
+    float frequency;
+    float phase;
+    float phaseIncrement;
+    bool beingRead;
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+} Synth;
+Synth* synth_init(Arena* arena, uint16_t sampleRate);
+void synth_generate_audio(Synth* synth);
+
 /* Sound Controller and Sample */
 
 typedef struct
@@ -44,6 +62,7 @@ typedef struct
 #define NO_ACTIVE_SAMPLE -25
 #define MAX_ACTIVE_ONE_SHOT 5
 
+
 typedef struct
 {
     Sample** activeSamples;
@@ -61,11 +80,12 @@ typedef struct
     bool newQueued;
     uint8_t channelCount;
     /* 2 byte hole */
+    Synth* synth;
     Arena* arena;
 } SoundController;
 
 //Only vaild format is f32 thus far
-SoundController* sound_controller_init(float bpm, const char* loadDirectory, uint8_t beatsPerBar, uint8_t barsPerLoop, uint16_t sampleRate, uint8_t channelCount, ma_format format);
+SoundController* sound_controller_init(float bpm, const char* loadDirectory, uint8_t beatsPerBar, uint8_t barsPerLoop, uint16_t sampleRate, uint8_t channelCount, ma_format format, bool synth);
 void data_callback_f32(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount);
 void sound_controller_destroy(SoundController* sc);
 

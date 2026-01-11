@@ -1,4 +1,5 @@
 #include "planetary_loop_machine.h"
+#include "math.h"
 
 
 uint32_t calculate_loop_frames(float bpm, uint32_t sample_rate, uint32_t beats_per_bar, uint32_t bars)
@@ -68,7 +69,7 @@ Sample* sample_F32_load(SoundController* soundController, const char* filename, 
 }
 
 
-SoundController* sound_controller_init(float bpm, const char* loadDirectory, uint8_t beatsPerBar, uint8_t barsPerLoop, uint16_t sampleRate, uint8_t channelCount, ma_format format)
+SoundController* sound_controller_init(float bpm, const char* loadDirectory, uint8_t beatsPerBar, uint8_t barsPerLoop, uint16_t sampleRate, uint8_t channelCount, ma_format format, bool synth)
 {
     DIR *dir;
     struct dirent *entry;
@@ -147,6 +148,11 @@ SoundController* sound_controller_init(float bpm, const char* loadDirectory, uin
 
     closedir(dir);
 
+    if (synth)
+        sController->synth = synth_init(sController->arena, sampleRate);
+    else
+        sController->synth = NULL;
+
     return sController;
 }
 
@@ -155,10 +161,12 @@ void sound_controller_destroy(SoundController* sc)
     arena_destroy(sc->arena);
 }
 
+void synth_buffer_being_read(Synth* synth);
+void synth_frames_read(Synth *synth);
 void data_callback_f32(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount)
 {
     SoundController* s = (SoundController*)pDevice->pUserData;
-    if (s->activeCount == 0 && s->oneShotCount == 0) return;
+    if (s->activeCount == 0 && s->oneShotCount == 0 && s->synth == NULL) return;
 
     uint8_t count = s->activeCount;
     uint8_t oneShotCount = s->oneShotCount;
@@ -169,10 +177,21 @@ void data_callback_f32(ma_device* pDevice, void* pOutput, const void* pInput, ma
     for (uint8_t i = 0; i < oneShotCount; ++i)
         activeSamples[count++] = s->oneShotActive[i];
 
+
     float* pOutputF32 = (float*)pOutput;
     uint32_t pushedFrames = 0;
 
     uint8_t channelCount = s->channelCount;
+
+    //Synth
+    Synth* synth = s->synth;
+    bool synthActive = false;
+    if (synth != NULL)
+    {
+        synthActive = true;
+        synth_buffer_being_read(synth);
+    }
+
     while(pushedFrames < frameCount * channelCount)
     {
         for(uint i = 0; i < count; ++i)
@@ -223,6 +242,13 @@ void data_callback_f32(ma_device* pDevice, void* pOutput, const void* pInput, ma
                 }
             }
         }
+        if (synthActive)
+        {
+            float volume = synth->volume;
+            pOutputF32[pushedFrames] += synth->buffer[synth->cursor++] * volume;
+            if (synth->cursor > synth->bufferMax)
+                synth->cursor = 0;
+        }
         ++pushedFrames;
 
         if (s->globalCursor == 0)
@@ -246,8 +272,11 @@ void data_callback_f32(ma_device* pDevice, void* pOutput, const void* pInput, ma
         if (s->globalCursor > s->loopFrameLength)
             s->globalCursor = 0;
     }
+    if (synthActive)
+        synth_frames_read(synth);
 
     (void)pDevice;
+    (void)pOutput;
 }
 
 
@@ -1174,4 +1203,80 @@ void one_shot_check(SoundController* sc)
             //printf("[DEBUG] oneshot %u is reset. Active one shots: %u\n", i, sc->oneShotCount);
         }
     }
+}
+
+/* Synth implmentation */
+
+#define PI 3.14159265358979323846
+#define TWO_PI (2.0 * PI)
+
+Synth* synth_init(Arena* arena, uint16_t sampleRate)
+{
+
+    Synth* synth = arena_alloc(arena, sizeof(Synth), NULL);
+    synth->bufferMax = sampleRate * 2; //for 1 sec of audio buffer as we take 2 channels
+    synth->sampleRate = sampleRate;
+    synth->beingRead = false;
+    synth->cursor = 0;
+    synth->cursorMax = 0;
+    synth->frequency = 440.00f;
+    synth->phase = 0.0f;
+    synth->volume = 1.0f;
+    synth->phaseIncrement = TWO_PI * synth->frequency / sampleRate;
+
+
+
+    synth->buffer = arena_alloc(arena, sizeof(float) * synth->bufferMax, NULL);
+    memset(synth->buffer, 0, sizeof(float) * synth->bufferMax);
+
+    return synth;
+}
+
+// Called by audio callback before reading buffer
+void synth_buffer_being_read(Synth* synth)
+{
+    pthread_mutex_lock(&synth->mutex);
+    synth->beingRead = true;
+    pthread_mutex_unlock(&synth->mutex);
+}
+
+// Called by audio callback after reading buffer
+void synth_frames_read(Synth *synth)
+{
+    pthread_mutex_lock(&synth->mutex);
+    synth->beingRead = false;
+    pthread_cond_signal(&synth->cond);
+    pthread_mutex_unlock(&synth->mutex);
+}
+
+void synth_generate_audio(Synth* synth)
+{
+    if (synth == NULL)
+        return;
+
+    synth->phaseIncrement = TWO_PI * synth->frequency / synth->sampleRate;
+
+    pthread_mutex_lock(&synth->mutex);  // Lock BEFORE checking
+
+    while (synth->beingRead)
+        pthread_cond_wait(&synth->cond, &synth->mutex);
+
+    for (int i = 0; i < synth->bufferMax; ++i)
+    {
+        // Generate sample using phase
+        synth->buffer[i] = sin(synth->phase) * 0.05; // *0.05 to get the sound down in line with other sampl
+        synth->buffer[++i] = sin(synth->phase) * 0.05; // generating the same sample for both frames
+
+        // Increment phase
+        synth->phase += synth->phaseIncrement;
+
+        // Wrap phase to prevent accumulation errors
+        // This is the "wrap around" - keep phase in range [0, 2π]
+        if (synth->phase >= TWO_PI)
+        {
+            synth->phase -= TWO_PI;
+        }
+
+    }
+    pthread_mutex_unlock(&synth->mutex);  // Unlock when done
 }
