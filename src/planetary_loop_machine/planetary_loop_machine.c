@@ -916,6 +916,37 @@ void command_multi(InputController* ic, SoundController* sc)
 
 }
 
+void command_synth_volume(InputController* ic, SoundController* sc)
+{
+    char volumeChange[strlen(ic->command) -1];
+    strcpy(volumeChange, ic->command + 2);
+
+    float volume = atof(volumeChange);
+
+    if (volume >= 0 && volume <= 1)
+        sc->synth->volume = volume;
+    else
+        printf(MAGENTA "\t\tWARNING: Volume out of range (0.0 - 1.0). Command: %s\n" RESET, ic->command);
+}
+
+void command_synth_frequence(InputController* ic, SoundController* sc)
+{
+
+    char frequencyChange[strlen(ic->command) -1];
+    strcpy(frequencyChange, ic->command + 2);
+
+    float frequency = atof(frequencyChange);
+
+
+    if (frequency >= 30 && frequency <= 20000)
+    {
+        sc->synth->frequency = frequency;
+        sc->synth->phase = 0;
+    }
+    else
+        printf(MAGENTA "\t\tWARNING: Frequency out of range (30.0 - 20000.0). Command: %s\n" RESET, ic->command);
+
+}
 
 int fire_command(InputController* ic, SoundController* sc)
 {
@@ -954,8 +985,12 @@ int fire_command(InputController* ic, SoundController* sc)
         else
             command_volume(ic, sc);
         break;
-
-
+    case 'y':
+        if (ic->command[1] == 'f')
+            command_synth_frequence(ic, sc);
+        else if (ic->command[1] == 'v')
+            command_synth_volume(ic, sc);
+        break;
     }
 
     command_reset(ic);
@@ -1045,6 +1080,8 @@ char get_char_from_linux_key(uint8_t value)
         return 'k';
     case KEY_V:
         return 'v';
+    case KEY_Y:
+        return 'y';
     case KEY_M:
         return 'm';
     case KEY_MINUS:
@@ -1255,6 +1292,7 @@ void synth_generate_audio(Synth* synth)
         return;
 
     synth->phaseIncrement = TWO_PI * synth->frequency / synth->sampleRate;
+    float phase = synth->phase;
 
     pthread_mutex_lock(&synth->mutex);  // Lock BEFORE checking
 
