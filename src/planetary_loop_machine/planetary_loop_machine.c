@@ -74,7 +74,7 @@ Sample* sample_F32_load(SoundController* soundController, const char* filename, 
 }
 
 
-SoundController* sound_controller_init(float bpm, const char* loadDirectory, uint8_t beatsPerBar, uint8_t barsPerLoop, uint16_t sampleRate, uint8_t channelCount, ma_format format, bool synth)
+SoundController* sound_controller_init(float bpm, const char* loadDirectory, uint8_t beatsPerBar, uint8_t barsPerLoop, uint16_t sampleRate, uint8_t channelCount, ma_format format, uint8_t synthMax)
 {
     DIR *dir;
     struct dirent *entry;
@@ -143,20 +143,26 @@ SoundController* sound_controller_init(float bpm, const char* loadDirectory, uin
         assert(false && "given format invalid\n");
     }
 
+    if (synthMax > 0)
+    {
+        sController->synth = arena_alloc(arena, sizeof(Synth*) * synthMax, NULL);
+        sController->synthMax = synthMax;
+        sController->synthCount = 0;
+    }
+    else
+    {
+        sController->synth = NULL;
+        sController->synthMax = 0;
+        sController->synthCount = 0;
+    }
 
-
-    printf("\nSuccessfully loading of session at %s - Sample rate: %u, Channels: %u, Format: %s, BPM: %0.2f, Beats per loop: %u (frames: %u)\nSamples:\n", loadDirectory, sampleRate, channelCount, formatStr,
-           sController->bpm, (beatsPerBar * barsPerLoop) /2, sController->loopFrameLength);
+    printf("\nSuccessfully loading of session at %s - Sample rate: %u, Channels: %u, Format: %s, BPM: %0.2f, Beats per loop: %u (frames: %u)\nMemory for %u Synths\nSamples:\n",
+           loadDirectory, sampleRate, channelCount, formatStr, sController->bpm, (beatsPerBar * barsPerLoop) /2, sController->loopFrameLength, synthMax);
     for (uint32_t j = 0; j < sController->sampleCount; ++j)
         printf("  %s (%u Sample Count - %u length in sec)\n", sController->samples[j]->name, sController->samples[j]->length,
                sController->samples[j]->length / sampleRate);
 
     closedir(dir);
-
-    if (synth)
-        sController->synth = synth_init(sController->arena, sampleRate);
-    else
-        sController->synth = NULL;
 
     return sController;
 }
@@ -172,7 +178,7 @@ void data_callback_f32(ma_device* pDevice, void* pOutput, const void* pInput, ma
 {
     //printf("FrameCount: %u\n", frameCount);
     SoundController* s = (SoundController*)pDevice->pUserData;
-    if (s->activeCount == 0 && s->oneShotCount == 0 && s->synth == NULL) return;
+    if (s->activeCount == 0 && s->oneShotCount == 0 && s->synthCount == 0) return;
 
     uint8_t count = s->activeCount;
     uint8_t oneShotCount = s->oneShotCount;
@@ -188,15 +194,6 @@ void data_callback_f32(ma_device* pDevice, void* pOutput, const void* pInput, ma
     uint32_t pushedFrames = 0;
 
     uint8_t channelCount = s->channelCount;
-
-    //Synth
-    Synth* synth = s->synth;
-    bool synthActive = false;
-    if (synth != NULL)
-    {
-        synthActive = true;
-        synth_buffer_being_read(synth);
-    }
 
     while(pushedFrames < frameCount * channelCount)
     {
@@ -248,13 +245,7 @@ void data_callback_f32(ma_device* pDevice, void* pOutput, const void* pInput, ma
                 }
             }
         }
-        if (synthActive)
-        {
-            float volume = synth->volume;
-            pOutputF32[pushedFrames] += synth->buffer[synth->cursor++] * volume;
-            if (synth->cursor > synth->bufferMax)
-                synth->cursor = 0;
-        }
+
         ++pushedFrames;
 
         if (s->globalCursor == 0)
@@ -278,8 +269,28 @@ void data_callback_f32(ma_device* pDevice, void* pOutput, const void* pInput, ma
         if (s->globalCursor > s->loopFrameLength)
             s->globalCursor = 0;
     }
-    if (synthActive)
-        synth_frames_read(synth);
+    // Synth audio pushing
+    if (s->synthCount > 0)
+    {
+        for (uint8_t i = 0; i < s->synthCount; ++i)
+        {
+            Synth* synth = s->synth[i];
+            float volume = synth->volume;
+            pushedFrames = 0;
+            synth_buffer_being_read(synth);
+
+            while(pushedFrames < frameCount * channelCount)
+            {
+                pOutputF32[pushedFrames++] += synth->buffer[synth->cursor++] * volume;
+                if (synth->cursor > synth->bufferMax)
+                {
+                    synth->cursor = 0;
+                    printf("WARNING - synth[%u] cursor wrapped around\n", i);
+                }
+            }
+            synth_frames_read(synth);
+        }
+    }
 
     (void)pDevice;
     (void)pOutput;
@@ -362,7 +373,6 @@ void poll_keyboard(InputController* ic)
         {
             if (errno == EAGAIN || errno == EWOULDBLOCK)
             {
-                // No more data - this is expected!
                 break;
             }
             else
@@ -370,11 +380,6 @@ void poll_keyboard(InputController* ic)
                 perror("read error");
                 break;
             }
-        }
-        else
-        {
-            // Partial read (rare) - could handle or ignore
-            break;
         }
     }
 }
@@ -390,10 +395,11 @@ int command_quit(InputController* ic, SoundController* sc)
             printf(BOLD_MAGENTA "\t\tWARNING: Stopping active sample on Channel %u (%s) before quitting\n" RESET, sc->activeIndex[i], sc->activeSamples[sc->activeIndex[i]]->name);
             active = true;
         }
-        if (active)
-            return 0;
     }
-    return END_MISSION;
+    if (active)
+        return 0;
+    else
+        return END_MISSION;
 }
 
 void command_kill_all(SoundController* sc)
@@ -545,6 +551,7 @@ void command_kill(InputController* ic, SoundController* sc)
 
 }
 
+void print_synth_lfo_info(Synth* synth);
 void command_list(InputController* ic, SoundController* sc)
 {
     if (strcmp(ic->command, "la") == 0)
@@ -617,8 +624,44 @@ void command_list(InputController* ic, SoundController* sc)
                 printf(BOLD_YELLOW "\t\tSampleID: %u - %s\n" RESET, i, sc->samples[i]->name);
         }
     }
+    else if (strcmp(ic->command, "ly_SYNTH_ONLY") == 0)
+    {
+        if (sc->synthCount > 0)
+        {
+            for (uint8_t i = 0; i < sc->synthCount; ++i)
+            {
+                if (sc->synth[i]->FLAGS & SYNTH_ACTIVE)
+                    printf(BOLD_GREEN "\t\tSynth: %s channel:%d, Frequency: %0.f2, Volume: %0.2f\n" RESET, sc->synth[i]->name, i +1, sc->synth[i]->frequency, sc->synth[i]->volume);
+                else
+                    printf(BOLD_YELLOW "\t\tSynth: %s channel:%d, Frequency: %0.f2, Volume: %0.2f\n" RESET, sc->synth[i]->name, i +1, sc->synth[i]->frequency, sc->synth[i]->volume);
+            }
+        }
+        else
+            printf(MAGENTA "\t\tNo Synths attached\n" RESET);
+    }
+    else if (strcmp(ic->command, "ly") == 0)
+    {
+        if (sc->synthCount > 0)
+        {
+            for (uint8_t i = 0; i < sc->synthCount; ++i)
+            {
+                if (sc->synth[i]->FLAGS & SYNTH_ACTIVE)
+                {
+                    printf(BOLD_GREEN "\t\tSynth: %s channel:%d, Frequency: %0.f2, Volume: %0.2f\n" RESET, sc->synth[i]->name, i +1, sc->synth[i]->frequency, sc->synth[i]->volume);
+                    print_synth_lfo_info(sc->synth[i]);
+                }
+                else
+                {
+                    printf(BOLD_YELLOW "\t\tSynth: %s channel:%d, Frequency: %0.f2, Volume: %0.2f\n" RESET, sc->synth[i]->name, i +1, sc->synth[i]->frequency, sc->synth[i]->volume);
+                    print_synth_lfo_info(sc->synth[i]);
+                }
+            }
+        }
+        else
+            printf(MAGENTA "\t\tNo Synths attached\n" RESET);
+    }
     else
-        printf(MAGENTA "\t\tInvaild list command ('la' - active | 'ls' - all samples)\n" RESET);
+        printf(MAGENTA "\t\tInvaild list command ('la' - active | 'li' - inactive | 'ls' - all samples | 'ly' - Synths)\n" RESET);
 }
 
 void parse_sample_to_channel(const char* command, uint16_t* sampleIndex, uint8_t* channel)
@@ -924,34 +967,63 @@ void command_multi(InputController* ic, SoundController* sc)
 
 void command_synth_volume(InputController* ic, SoundController* sc)
 {
-    char volumeChange[strlen(ic->command) -1];
-    strcpy(volumeChange, ic->command + 2);
+    //yv0.3c2
+    if ((isdigit(ic->command[2])) || ic->command[2] == '.')
+    {
+        float volume;
+        uint32_t synthIndex;
+        sscanf(ic->command, "yv%fc%u", &volume, &synthIndex);
 
-    float volume = atof(volumeChange);
-
-    if (volume >= 0 && volume <= 1)
-        sc->synth->volume = volume;
+        printf("%f %u\n", volume, synthIndex);
+        if (volume >= 0 && volume <= 1)
+        {
+            if (synthIndex <= sc->synthCount)
+            {
+                sc->synth[synthIndex -1]->volume = volume;
+                printf(BOLD_GREEN "\t\tVolume of Synth: %s set to %0.2f\n" RESET, sc->synth[synthIndex -1]->name, volume);
+            }
+            else
+                printf(MAGENTA "\t\tWARNING: Synth Index out of range. Command: %s\n" RESET, ic->command);
+        }
+        else
+            printf(MAGENTA "\t\tWARNING: Volume out of range (0.0 - 1.0). Command: %s\n" RESET, ic->command);
+    }
     else
-        printf(MAGENTA "\t\tWARNING: Volume out of range (0.0 - 1.0). Command: %s\n" RESET, ic->command);
+        printf(MAGENTA "\t\tWARNING: Invaild Synth Command: %s\n" RESET, ic->command);
+
+    return;
 }
 
 void command_synth_frequence(InputController* ic, SoundController* sc)
 {
-
-    char frequencyChange[strlen(ic->command) -1];
-    strcpy(frequencyChange, ic->command + 2);
-
-    float frequency = atof(frequencyChange);
-
-
-    if (frequency >= 30 && frequency <= 20000)
+    //yf440.4c3
+    if (isdigit(ic->command[2]))
     {
-        sc->synth->frequency = frequency;
-        sc->synth->phase = 0;
+        float frequency;
+        uint32_t synthIndex;
+        sscanf(ic->command, "yf%fc%u", &frequency, &synthIndex);
+
+        printf("%f %u\n", frequency, synthIndex);
+
+        if (frequency >= 30 && frequency <= 20000)
+        {
+            if (synthIndex <= sc->synthCount)
+            {
+
+                sc->synth[synthIndex -1]->frequency = frequency;
+                sc->synth[synthIndex -1]->phase = 0;
+                printf(BOLD_GREEN "\t\tFrequency of Synth: %s set to %0.2f\n" RESET, sc->synth[synthIndex -1]->name, frequency);
+            }
+            else
+                printf(MAGENTA "\t\tWARNING: Synth Index out of range. Command: %s\n" RESET, ic->command);
+        }
+        else
+            printf(MAGENTA "\t\tWARNING: Frequency out of range (30.0 - 20000.0). Command: %s\n" RESET, ic->command);
     }
     else
-        printf(MAGENTA "\t\tWARNING: Frequency out of range (30.0 - 20000.0). Command: %s\n" RESET, ic->command);
+        printf(MAGENTA "\t\tWARNING: Invaild Synth Command: %s\n" RESET, ic->command);
 
+    return;
 }
 
 int fire_command(InputController* ic, SoundController* sc)
@@ -996,6 +1068,8 @@ int fire_command(InputController* ic, SoundController* sc)
             command_synth_frequence(ic, sc);
         else if (ic->command[1] == 'v')
             command_synth_volume(ic, sc);
+        else
+            printf(MAGENTA "\t\tWARNING: Invaild Synth Command: %s\n" RESET, ic->command);
         break;
     }
 
@@ -1011,44 +1085,23 @@ void tab_info(InputController* ic, SoundController* s)
     strcpy(command, ic->command);
     //printf("[DEBUG] command inputted: %s\n", command);
 
-    /* To Complicated when we only how inactive samples before launching...
-       int32_t i = 0;
-    uint8_t numberCount = 0;
-    bool next = true;
-    while(command[ i ] != '\0')
+
+    if (command[0] == 'y')
     {
-        if (isdigit(command[i]) && next)
-        {
-            numberCount++;
-            next = false;
-        }
-        else if (command[i] == 'k')  // to account for killing only having one digit in command
-            numberCount++;
-        else if (isalpha(command[i]) && !next)
-            next = true;
-
-        ++i;
+        strcpy(ic->command, "ly_SYNTH_ONLY");
+        ic->commandIndex = 13;
     }
-
-    command_reset(ic);
-    printf("%u\n", numberCount);
-    if (numberCount == 0 || numberCount % 2 == 0)
+    else if (command[commandLength -1] == 'l' || command[commandLength -1] == 'o')
     {
-        if (command[commandLength -1] == 'l' || command[commandLength -1] == 'o')
-            strcpy(ic->command, "li");
-        else
-            strcpy(ic->command, "la");
-    }
-    else
-        strcpy(ic->command, "la");
-        */
-
-    if (command[commandLength -1] == 'l' || command[commandLength -1] == 'o')
         strcpy(ic->command, "li");
+        ic->commandIndex = 2;
+    }
     else
+    {
         strcpy(ic->command, "la");
+        ic->commandIndex = 2;
+    }
 
-    ic->commandIndex = 2;
     //printf("[DEBUG] new command: %s\n", ic->command);
     fire_command(ic, s);
 
@@ -1254,28 +1307,33 @@ void one_shot_check(SoundController* sc)
 #define TWO_PI (2.0 * PI)
 
 void synth_audio_buffer_init(Synth* synth);
-Synth* synth_init(Arena* arena, uint16_t sampleRate)
+Synth* synth_init(SoundController* sc, const char* name, uint16_t sampleRate, float frequency, uint32_t FLAGS)
 {
-
-    Synth* synth = arena_alloc(arena, sizeof(Synth), NULL);
+    Synth* synth = arena_alloc(sc->arena, sizeof(Synth), NULL);
+    memset(synth, 0, sizeof(Synth));
     synth->bufferMax = sampleRate * 2; //for 1 sec of audio buffer as we take 2 channels
+    strncpy(synth->name, name, 9);
     synth->sampleRate = sampleRate;
-    synth->beingRead = false;
+    synth->FLAGS = FLAGS;
     synth->cursor = 0;
-    synth->frequency = 440.00f;
+    synth->frequency = frequency;
     synth->phase = 0.0f;
     synth->volume = 1.0f;
     synth->phaseIncrement = TWO_PI * synth->frequency / sampleRate;
+    synth->lfo = NULL;
 
-    synth->buffer = arena_alloc(arena, sizeof(float) * synth->bufferMax, NULL);
+    synth->buffer = arena_alloc(sc->arena, sizeof(float) * synth->bufferMax, NULL);
     memset(synth->buffer, 0, sizeof(float) * synth->bufferMax);
 
     //synth_audio_buffer_init(synth);
 
+    assert(sc->synthCount < sc->synthMax && "ERROR synth max exceeded");
+    sc->synth[sc->synthCount++] = synth;
+
     return synth;
 }
 
-void LFO_attach(SoundController* sc, Synth* synth, LFO_Module_Type type, float intensity, float frequency)
+void LFO_attach(SoundController* sc, Synth* synth, LFO_Module_Type type, float intensity, float frequency, uint8_t FLAGS)
 {
     LFO_Module* lfo = arena_alloc(sc->arena, sizeof(LFO_Module), NULL);
     lfo->type = type;
@@ -1284,6 +1342,8 @@ void LFO_attach(SoundController* sc, Synth* synth, LFO_Module_Type type, float i
     lfo->frequency = frequency;
     lfo->phaseIncrement = TWO_PI * frequency / synth->sampleRate;
     lfo->nextLFO = NULL;
+    lfo->FLAGS = FLAGS;
+
 
     if (synth->lfo == NULL)
         synth->lfo = lfo;
@@ -1311,7 +1371,7 @@ void LFO_attach(SoundController* sc, Synth* synth, LFO_Module_Type type, float i
 void synth_buffer_being_read(Synth* synth)
 {
     pthread_mutex_lock(&synth->mutex);
-    synth->beingRead = true;
+    synth->FLAGS |= SYNTH_BUFFER_BEING_READ;
     pthread_mutex_unlock(&synth->mutex);
 }
 
@@ -1319,7 +1379,7 @@ void synth_buffer_being_read(Synth* synth)
 void synth_frames_read(Synth *synth)
 {
     pthread_mutex_lock(&synth->mutex);
-    synth->beingRead = false;
+    synth->FLAGS &= ~SYNTH_BUFFER_BEING_READ;
     pthread_cond_signal(&synth->cond);
     pthread_mutex_unlock(&synth->mutex);
 }
@@ -1330,11 +1390,11 @@ void synth_audio_buffer_init(Synth* synth)
 
     pthread_mutex_lock(&synth->mutex);  // Lock before checking
 
-    while (synth->beingRead)
+    while (synth->FLAGS & SYNTH_BUFFER_BEING_READ)
         pthread_cond_wait(&synth->cond, &synth->mutex); // Wait if being currently read
 
 
-    for (int i = 0; i < synth->bufferMax; ++i)
+    for (uint32_t i = 0; i < synth->bufferMax; ++i)
     {
         synth->buffer[i] = sin(synth->phase) * 0.05; // *0.05 to get the sound down in line with other sampl
         synth->buffer[++i] = sin(synth->phase) * 0.05; // generating the same sample for both frames
@@ -1354,22 +1414,32 @@ void synth_audio_buffer_init(Synth* synth)
     pthread_mutex_unlock(&synth->mutex);  // Unlock when done
 }
 
+void controller_synth_generate_audio(SoundController* sc)
+{
+    if (sc->synthCount == 0)
+        return;
+
+    for (uint8_t i = 0; i < sc->synthCount; ++i)
+        synth_generate_audio(sc->synth[i]);
+}
+
 void synth_generate_audio(Synth* synth)
 {
-    if (synth == NULL || synth->cursor == 0) // Only entering if samples need to be generated
+    assert(synth != NULL);
+    if (synth->cursor == 0 || !(synth->FLAGS & SYNTH_ACTIVE)) // Only entering if samples need to be generated or synth is currently active
         return;
 
     synth->phaseIncrement = TWO_PI * synth->frequency / synth->sampleRate;
 
     pthread_mutex_lock(&synth->mutex);  // Lock before checking
 
-    while (synth->beingRead)
+    while (synth->FLAGS & SYNTH_BUFFER_BEING_READ)
         pthread_cond_wait(&synth->cond, &synth->mutex); // Wait if being currently read
 
     memmove(synth->buffer, synth->buffer + synth->cursor, sizeof(float) * (synth->bufferMax - synth->cursor));
 
 
-    for (int i = synth->bufferMax - synth->cursor; i < synth->bufferMax; ++i)
+    for (uint32_t i = synth->bufferMax - synth->cursor; i < synth->bufferMax; ++i)
     {
         synth->buffer[i] = sin(synth->phase) * 0.05; // *0.05 to get the sound down in line with other sample
         if (i + 1 < synth->bufferMax)
@@ -1384,18 +1454,21 @@ void synth_generate_audio(Synth* synth)
             uint8_t saftey = 0;
             while(saftey < 255)
             {
-                switch (lfo->type)
+                if (lfo->FLAGS & LFO_MODULE_ACTIVE)
                 {
-                case LFO_TYPE_PHASE:
-                    lfo->phase += lfo->phaseIncrement;
-                    synth->phase += lfo->phase * lfo->intensity;
-                    break;
-                default:
-                    assert(false && "ERROR - LFO type couldn't be found");
-                }
+                    switch (lfo->type)
+                    {
+                    case LFO_TYPE_PHASE:
+                        lfo->phase += lfo->phaseIncrement;
+                        synth->phase += lfo->phase * lfo->intensity;
+                        break;
+                    default:
+                        assert(false && "ERROR - LFO type couldn't be found");
+                    }
 
-                if(lfo->phase >= TWO_PI)
-                    lfo->phase -= TWO_PI;
+                    if(lfo->phase >= TWO_PI)
+                        lfo->phase -= TWO_PI;
+                }
 
                 if (lfo->nextLFO == NULL)
                     break;
@@ -1417,9 +1490,47 @@ void synth_generate_audio(Synth* synth)
 
     pthread_mutex_unlock(&synth->mutex);  // Unlock when done
 }
-
-
 /* Interesting LFO generation to test
 synth->buffer[i] = sin(synth->phase * synth->lfo) * 0.05; // *0.05 to get the sound down in line with other sampl
 synth->buffer[++i] = sin(synth->phase * synth->lfo) * 0.05; // generating the same sample for both frames
 */
+const char* lfo_type_string(LFO_Module_Type type)
+{
+    switch (type)
+    {
+    case LFO_TYPE_PHASE:
+        return "Phase";
+    default:
+        assert(false && "ERROR - Incorrect type info on LFO print out");
+    }
+}
+
+void print_synth_lfo_info(Synth* synth)
+{
+    if (synth->lfo == NULL)
+        return;
+
+    LFO_Module* lfo = synth->lfo;
+    uint8_t saftey = 0;
+
+    while(saftey < 255)
+    {
+        if (lfo->FLAGS & LFO_MODULE_ACTIVE)
+            printf(GREEN "\t\t\tLFO type: %s - Frequency: %0.f2, intensity: %0.2f\n" RESET, lfo_type_string(lfo->type), lfo->frequency, lfo->intensity);
+        else
+            printf(YELLOW "\t\t\tLFO type: %s - Frequency: %0.f2, intensity: %0.2f\n" RESET, lfo_type_string(lfo->type), lfo->frequency, lfo->intensity);
+
+        if (lfo->nextLFO == NULL)
+            break;
+        else
+            lfo = lfo->nextLFO;
+
+        ++saftey;
+    }
+    assert(saftey != 255 && "ERROR - print out lfo loop saftey triggered");
+
+}
+
+
+
+

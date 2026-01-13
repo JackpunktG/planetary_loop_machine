@@ -62,19 +62,21 @@ typedef struct
     uint32_t globalCursor;
     bool newQueued;
     uint8_t channelCount;
-    /* 2 byte hole */
-    Synth* synth;
+    uint8_t synthCount;
+    uint8_t synthMax;
+    Synth** synth;
     Arena* arena;
 } SoundController;
 
 //Only vaild format is f32 thus far
-SoundController* sound_controller_init(float bpm, const char* loadDirectory, uint8_t beatsPerBar, uint8_t barsPerLoop, uint16_t sampleRate, uint8_t channelCount, ma_format format, bool synth);
+SoundController* sound_controller_init(float bpm, const char* loadDirectory, uint8_t beatsPerBar, uint8_t barsPerLoop, uint16_t sampleRate, uint8_t channelCount, ma_format format, uint8_t synthMax);
 void data_callback_f32(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount);
 void sound_controller_destroy(SoundController* sc);
 
 //ran each loop to check status of one shot launched samples and reset their settings
 void one_shot_check(SoundController* sc);
-
+//generate for all attached synths
+void controller_synth_generate_audio(SoundController* sc);
 
 /* Synth */
 
@@ -82,6 +84,7 @@ typedef enum
 {
     LFO_TYPE_PHASE
 } LFO_Module_Type;
+#define LFO_MODULE_ACTIVE (1 << 0)
 
 typedef struct LFO_Module
 {
@@ -89,32 +92,43 @@ typedef struct LFO_Module
     float intensity;
     float frequency;
     float phaseIncrement;
+    uint8_t FLAGS;
+    /* 3-byte hole */
     LFO_Module_Type type;
     LFO_Module* nextLFO;
 } LFO_Module;
+
+typedef enum
+{
+    SYNTH_BUFFER_BEING_READ = (1 << 0),
+    SYNTH_ACTIVE            = (1 << 1)
+} Synth_FLAGS;
 
 typedef struct Synth
 {
     float* buffer;
     uint32_t cursor;
     uint32_t bufferMax;
-    uint16_t sampleRate;
     float volume;
     float frequency;
     float phase;
     float phaseIncrement;
-    bool beingRead;
+    uint16_t sampleRate;
+    char name[10];
+    uint32_t FLAGS;
     LFO_Module* lfo;
     pthread_mutex_t mutex;
     pthread_cond_t cond;
 } Synth;
-Synth* synth_init(Arena* arena, uint16_t sampleRate);
+
+//Name can be 9 characters long
+Synth* synth_init(SoundController* sc, const char* name, uint16_t sampleRate, float frequency, uint32_t FLAGS);
+//if you want to generate some sound before starting the callback
 void synth_generate_audio(Synth* synth);
-
 // best to send in bpm_to_hert(bpm) to the frequency parameter
-void LFO_attach(SoundController* sc, Synth* synth, uint32_t TYPE, float intensity, float frequency);
+void LFO_attach(SoundController* sc, Synth* synth, LFO_Module_Type type, float intensity, float frequency, uint8_t FLAGS);
 
-
+// bpm to hertz converter function
 float bpm_to_hz(float bpm);
 
 
