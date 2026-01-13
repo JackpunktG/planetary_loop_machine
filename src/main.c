@@ -58,12 +58,10 @@ int main(int argc, char** argv)
     }
     */
     InputController ic = {0};
-    int i = input_controller_init(&ic, 11);
+    int i = input_controller_init(&ic, 20);
     printf("%d\n", i);
     SoundController* s = sound_controller_init(122, "src/audio_data/song_1/", 4, 2, SAMPLE_RATE, CHANNEL_COUNT, SAMPLE_FORMAT, true);
     s->activeCount = 0;
-
-    synth_generate_audio(s->synth);
 
     /*
     FILE* file = fopen("sample_val.cvs", "a");

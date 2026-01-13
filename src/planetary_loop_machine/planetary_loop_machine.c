@@ -10,6 +10,11 @@ uint32_t calculate_loop_frames(float bpm, uint32_t sample_rate, uint32_t beats_p
     return (uint32_t)(frames_per_beat * beats_per_bar * bars);
 }
 
+float bpm_to_hz(float bpm)
+{
+    return bpm / 120;
+}
+
 Sample* sample_F32_load(SoundController* soundController, const char* filename, uint16_t index, uint8_t beatsPerBar, uint8_t barsPerLoop, uint16_t sampleRate, uint8_t channelCount)
 {
     ma_decoder decoder;
@@ -165,6 +170,7 @@ void synth_buffer_being_read(Synth* synth);
 void synth_frames_read(Synth *synth);
 void data_callback_f32(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount)
 {
+    //printf("FrameCount: %u\n", frameCount);
     SoundController* s = (SoundController*)pDevice->pUserData;
     if (s->activeCount == 0 && s->oneShotCount == 0 && s->synth == NULL) return;
 
@@ -1247,6 +1253,7 @@ void one_shot_check(SoundController* sc)
 #define PI 3.14159265358979323846
 #define TWO_PI (2.0 * PI)
 
+void synth_audio_buffer_init(Synth* synth);
 Synth* synth_init(Arena* arena, uint16_t sampleRate)
 {
 
@@ -1260,11 +1267,19 @@ Synth* synth_init(Arena* arena, uint16_t sampleRate)
     synth->phase = 0.0f;
     synth->volume = 1.0f;
     synth->phaseIncrement = TWO_PI * synth->frequency / sampleRate;
+    synth->lfo = 0.0f;
+    synth->lfoIntensity = 0.01;
+    synth->lfoFrequency = bpm_to_hz(122);
+    synth->lfoPhaseIncrement = TWO_PI * synth->lfoFrequency / sampleRate;
+    //printf("buffermax: %u, lfo frequency: %f\n", synth->bufferMax, synth->lfoFrequency);
+
 
 
 
     synth->buffer = arena_alloc(arena, sizeof(float) * synth->bufferMax, NULL);
     memset(synth->buffer, 0, sizeof(float) * synth->bufferMax);
+
+    synth_audio_buffer_init(synth);
 
     return synth;
 }
@@ -1286,35 +1301,78 @@ void synth_frames_read(Synth *synth)
     pthread_mutex_unlock(&synth->mutex);
 }
 
-void synth_generate_audio(Synth* synth)
+void synth_audio_buffer_init(Synth* synth)
 {
-    if (synth == NULL)
-        return;
-
     synth->phaseIncrement = TWO_PI * synth->frequency / synth->sampleRate;
-    float phase = synth->phase;
 
-    pthread_mutex_lock(&synth->mutex);  // Lock BEFORE checking
+    pthread_mutex_lock(&synth->mutex);  // Lock before checking
 
     while (synth->beingRead)
-        pthread_cond_wait(&synth->cond, &synth->mutex);
+        pthread_cond_wait(&synth->cond, &synth->mutex); // Wait if being currently read
+
 
     for (int i = 0; i < synth->bufferMax; ++i)
     {
-        // Generate sample using phase
         synth->buffer[i] = sin(synth->phase) * 0.05; // *0.05 to get the sound down in line with other sampl
         synth->buffer[++i] = sin(synth->phase) * 0.05; // generating the same sample for both frames
 
-        // Increment phase
-        synth->phase += synth->phaseIncrement;
+        // Lfo
+        synth->lfo += synth->lfoPhaseIncrement;
+        synth->phase += synth->phaseIncrement + synth->lfo * synth->lfoIntensity;
 
-        // Wrap phase to prevent accumulation errors
-        // This is the "wrap around" - keep phase in range [0, 2π]
+        //printf("before lfo: %f. phase: %f\n", synth->lfo, synth->phase);
+        // Wrap phase to prevent accumulation errors - keep phase in range [0, 2π]
         if (synth->phase >= TWO_PI)
-        {
             synth->phase -= TWO_PI;
-        }
+        if (synth->lfo >= TWO_PI)
+            synth->lfo -= TWO_PI;
+
 
     }
+    synth->cursor = 0;
+    //printf("lfo: %f. phase: %f\n", synth->lfo, synth->phase);
+
     pthread_mutex_unlock(&synth->mutex);  // Unlock when done
 }
+
+void synth_generate_audio(Synth* synth)
+{
+    if (synth == NULL || synth->cursor == 0) // Only entering if samples need to be generated
+        return;
+
+    synth->phaseIncrement = TWO_PI * synth->frequency / synth->sampleRate;
+
+    pthread_mutex_lock(&synth->mutex);  // Lock before checking
+
+    while (synth->beingRead)
+        pthread_cond_wait(&synth->cond, &synth->mutex); // Wait if being currently read
+
+    memcpy(synth->buffer, synth->buffer + synth->cursor, sizeof(float) * (synth->bufferMax - synth->cursor));
+
+    for (int i = synth->bufferMax - synth->cursor; i < synth->bufferMax; ++i)
+    {
+
+        synth->buffer[i] = sin(synth->phase) * 0.05; // *0.05 to get the sound down in line with other sampl
+        synth->buffer[++i] = sin(synth->phase) * 0.05; // generating the same sample for both frames
+
+        synth->lfo += synth->lfoPhaseIncrement;
+        synth->phase += synth->phaseIncrement + synth->lfo * synth->lfoIntensity;
+
+        //printf("before lfo: %f. phase: %f\n", synth->lfo, synth->phase);
+        // Wrap phase to prevent accumulation errors - keep phase in range [0, 2π]
+        if (synth->phase >= TWO_PI)
+            synth->phase -= TWO_PI;
+        if (synth->lfo >= TWO_PI)
+            synth->lfo -= TWO_PI;
+    }
+    synth->cursor = 0;
+    //printf("lfo: %f. phase: %f\n", synth->lfo, synth->phase);
+
+    pthread_mutex_unlock(&synth->mutex);  // Unlock when done
+}
+
+
+/* Interesting LFO generation to test
+synth->buffer[i] = sin(synth->phase * synth->lfo) * 0.05; // *0.05 to get the sound down in line with other sampl
+synth->buffer[++i] = sin(synth->phase * synth->lfo) * 0.05; // generating the same sample for both frames
+*/

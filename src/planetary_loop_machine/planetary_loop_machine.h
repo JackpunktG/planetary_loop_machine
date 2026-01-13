@@ -36,6 +36,10 @@ typedef struct
     float frequency;
     float phase;
     float phaseIncrement;
+    float lfo;
+    float lfoIntensity;
+    float lfoFrequency;
+    float lfoPhaseIncrement;
     bool beingRead;
     pthread_mutex_t mutex;
     pthread_cond_t cond;
