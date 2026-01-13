@@ -61,6 +61,10 @@ int main(int argc, char** argv)
     int i = input_controller_init(&ic, 20);
     printf("%d\n", i);
     SoundController* s = sound_controller_init(122, "src/audio_data/song_1/", 4, 2, SAMPLE_RATE, CHANNEL_COUNT, SAMPLE_FORMAT, true);
+    LFO_attach(s, s->synth, LFO_TYPE_PHASE, 0.02, bpm_to_hz((float)122/2));
+    LFO_attach(s, s->synth, LFO_TYPE_PHASE, 0.02, bpm_to_hz((float)122/4));
+    LFO_attach(s, s->synth, LFO_TYPE_PHASE, 0.02, bpm_to_hz((float)122/8));
+    LFO_attach(s, s->synth, LFO_TYPE_PHASE, 0.02, bpm_to_hz((float)122/16));
     s->activeCount = 0;
 
     /*

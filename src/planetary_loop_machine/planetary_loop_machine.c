@@ -1262,26 +1262,49 @@ Synth* synth_init(Arena* arena, uint16_t sampleRate)
     synth->sampleRate = sampleRate;
     synth->beingRead = false;
     synth->cursor = 0;
-    synth->cursorMax = 0;
     synth->frequency = 440.00f;
     synth->phase = 0.0f;
     synth->volume = 1.0f;
     synth->phaseIncrement = TWO_PI * synth->frequency / sampleRate;
-    synth->lfo = 0.0f;
-    synth->lfoIntensity = 0.01;
-    synth->lfoFrequency = bpm_to_hz(122);
-    synth->lfoPhaseIncrement = TWO_PI * synth->lfoFrequency / sampleRate;
-    //printf("buffermax: %u, lfo frequency: %f\n", synth->bufferMax, synth->lfoFrequency);
-
-
-
 
     synth->buffer = arena_alloc(arena, sizeof(float) * synth->bufferMax, NULL);
     memset(synth->buffer, 0, sizeof(float) * synth->bufferMax);
 
-    synth_audio_buffer_init(synth);
+    //synth_audio_buffer_init(synth);
 
     return synth;
+}
+
+void LFO_attach(SoundController* sc, Synth* synth, LFO_Module_Type type, float intensity, float frequency)
+{
+    LFO_Module* lfo = arena_alloc(sc->arena, sizeof(LFO_Module), NULL);
+    lfo->type = type;
+    lfo->phase = 0;
+    lfo->intensity = intensity;
+    lfo->frequency = frequency;
+    lfo->phaseIncrement = TWO_PI * frequency / synth->sampleRate;
+    lfo->nextLFO = NULL;
+
+    if (synth->lfo == NULL)
+        synth->lfo = lfo;
+    else
+    {
+        uint8_t saftey = 0;
+        LFO_Module* module = synth->lfo;
+        while(saftey < 255)
+        {
+            if (module->nextLFO == NULL)
+            {
+                module->nextLFO = lfo;
+                break;
+            }
+            else
+                module = module->nextLFO;
+
+            ++saftey;
+        }
+        assert(saftey != 255 && "ERROR - Next LFO Module couldn't be initalised");
+    }
 }
 
 // Called by audio callback before reading buffer
@@ -1317,16 +1340,12 @@ void synth_audio_buffer_init(Synth* synth)
         synth->buffer[++i] = sin(synth->phase) * 0.05; // generating the same sample for both frames
 
         // Lfo
-        synth->lfo += synth->lfoPhaseIncrement;
-        synth->phase += synth->phaseIncrement + synth->lfo * synth->lfoIntensity;
+        synth->phase += synth->phaseIncrement;
 
         //printf("before lfo: %f. phase: %f\n", synth->lfo, synth->phase);
         // Wrap phase to prevent accumulation errors - keep phase in range [0, 2π]
         if (synth->phase >= TWO_PI)
             synth->phase -= TWO_PI;
-        if (synth->lfo >= TWO_PI)
-            synth->lfo -= TWO_PI;
-
 
     }
     synth->cursor = 0;
@@ -1347,23 +1366,51 @@ void synth_generate_audio(Synth* synth)
     while (synth->beingRead)
         pthread_cond_wait(&synth->cond, &synth->mutex); // Wait if being currently read
 
-    memcpy(synth->buffer, synth->buffer + synth->cursor, sizeof(float) * (synth->bufferMax - synth->cursor));
+    memmove(synth->buffer, synth->buffer + synth->cursor, sizeof(float) * (synth->bufferMax - synth->cursor));
+
 
     for (int i = synth->bufferMax - synth->cursor; i < synth->bufferMax; ++i)
     {
+        synth->buffer[i] = sin(synth->phase) * 0.05; // *0.05 to get the sound down in line with other sample
+        if (i + 1 < synth->bufferMax)
+            synth->buffer[++i] = sin(synth->phase) * 0.05; // generating the same sample for both frames
+        else
+            printf("WARNING - Odd number of frames generated\n");
 
-        synth->buffer[i] = sin(synth->phase) * 0.05; // *0.05 to get the sound down in line with other sampl
-        synth->buffer[++i] = sin(synth->phase) * 0.05; // generating the same sample for both frames
+        synth->phase += synth->phaseIncrement;
+        if (synth->lfo != NULL)
+        {
+            LFO_Module* lfo = synth->lfo;
+            uint8_t saftey = 0;
+            while(saftey < 255)
+            {
+                switch (lfo->type)
+                {
+                case LFO_TYPE_PHASE:
+                    lfo->phase += lfo->phaseIncrement;
+                    synth->phase += lfo->phase * lfo->intensity;
+                    break;
+                default:
+                    assert(false && "ERROR - LFO type couldn't be found");
+                }
 
-        synth->lfo += synth->lfoPhaseIncrement;
-        synth->phase += synth->phaseIncrement + synth->lfo * synth->lfoIntensity;
+                if(lfo->phase >= TWO_PI)
+                    lfo->phase -= TWO_PI;
+
+                if (lfo->nextLFO == NULL)
+                    break;
+                else
+                    lfo = lfo->nextLFO;
+
+                ++saftey;
+            }
+            assert(saftey != 255 && "WARNING - saftey used to stop lfo loop");
+        }
 
         //printf("before lfo: %f. phase: %f\n", synth->lfo, synth->phase);
         // Wrap phase to prevent accumulation errors - keep phase in range [0, 2π]
         if (synth->phase >= TWO_PI)
             synth->phase -= TWO_PI;
-        if (synth->lfo >= TWO_PI)
-            synth->lfo -= TWO_PI;
     }
     synth->cursor = 0;
     //printf("lfo: %f. phase: %f\n", synth->lfo, synth->phase);

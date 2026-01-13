@@ -24,29 +24,8 @@
 //#define BARS_PER_LOOP  2     // most electronic music when we talk bpm its 2 beats(on 1 & 3) per bar so to loop every 4 beats its 2 bars
 // looping every 8 beats would be 4 bars, 16 beats = 8 bars, etc....
 
-
-typedef struct
-{
-    float* buffer;
-    uint32_t cursor;
-    uint32_t cursorMax; //amount of generated audio ready to be used
-    uint32_t bufferMax;
-    uint16_t sampleRate;
-    float volume;
-    float frequency;
-    float phase;
-    float phaseIncrement;
-    float lfo;
-    float lfoIntensity;
-    float lfoFrequency;
-    float lfoPhaseIncrement;
-    bool beingRead;
-    pthread_mutex_t mutex;
-    pthread_cond_t cond;
-} Synth;
-Synth* synth_init(Arena* arena, uint16_t sampleRate);
-void synth_generate_audio(Synth* synth);
-
+typedef struct Synth Synth;
+typedef struct LFO_Module LFO_Module;
 /* Sound Controller and Sample */
 
 typedef struct
@@ -95,6 +74,49 @@ void sound_controller_destroy(SoundController* sc);
 
 //ran each loop to check status of one shot launched samples and reset their settings
 void one_shot_check(SoundController* sc);
+
+
+/* Synth */
+
+typedef enum
+{
+    LFO_TYPE_PHASE
+} LFO_Module_Type;
+
+typedef struct LFO_Module
+{
+    float phase;
+    float intensity;
+    float frequency;
+    float phaseIncrement;
+    LFO_Module_Type type;
+    LFO_Module* nextLFO;
+} LFO_Module;
+
+typedef struct Synth
+{
+    float* buffer;
+    uint32_t cursor;
+    uint32_t bufferMax;
+    uint16_t sampleRate;
+    float volume;
+    float frequency;
+    float phase;
+    float phaseIncrement;
+    bool beingRead;
+    LFO_Module* lfo;
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+} Synth;
+Synth* synth_init(Arena* arena, uint16_t sampleRate);
+void synth_generate_audio(Synth* synth);
+
+// best to send in bpm_to_hert(bpm) to the frequency parameter
+void LFO_attach(SoundController* sc, Synth* synth, uint32_t TYPE, float intensity, float frequency);
+
+
+float bpm_to_hz(float bpm);
+
 
 /* Input Controller and UI */
 
@@ -152,3 +174,6 @@ void input_controller_destroy(InputController* ic);
 void poll_keyboard(InputController* ic);
 int input_process(InputController* ic, SoundController* s);
 void slider_update(InputController* ic, SoundController* sc);
+
+
+
