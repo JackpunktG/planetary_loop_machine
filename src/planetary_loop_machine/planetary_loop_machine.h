@@ -88,10 +88,10 @@ typedef enum
 
 typedef struct LFO_Module
 {
-    float phase;
-    float intensity;
+    double phase;
+    double phaseIncrement;
+    float intensity; //think like the volume of the LFO effect
     float frequency;
-    float phaseIncrement;
     uint8_t FLAGS;
     /* 3-byte hole */
     LFO_Module_Type type;
@@ -114,10 +114,10 @@ typedef struct Synth
     float* buffer;
     uint32_t cursor;
     uint32_t bufferMax;
+    double phase;
+    double phaseIncrement;
     float volume;
     float frequency;
-    float phase;
-    float phaseIncrement;
     uint16_t sampleRate;
     char name[14];
     Synth_Type type;

@@ -1389,7 +1389,7 @@ void basic_sinewave_synth_audio_generate(Synth* synth)
 {
     for (uint32_t i = synth->bufferMax - synth->cursor; i < synth->bufferMax; ++i)
     {
-        float toGenPhase = synth->phase; //Saving the phase to be used to generate the sound, to the certin LFO's can maniplate it in different ways
+        double toGenPhase = synth->phase; //Saving the phase to be used to generate the sound, to the certin LFO's can maniplate it in different ways
 
         if (synth->lfo != NULL)
         {
