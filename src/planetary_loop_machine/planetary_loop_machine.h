@@ -104,6 +104,11 @@ typedef enum
     SYNTH_ACTIVE            = (1 << 1)
 } Synth_FLAGS;
 
+typedef enum
+{
+    SYNTH_TYPE_BASIC_SINEWAVE
+} Synth_Type;
+
 typedef struct Synth
 {
     float* buffer;
@@ -114,15 +119,16 @@ typedef struct Synth
     float phase;
     float phaseIncrement;
     uint16_t sampleRate;
-    char name[10];
+    char name[14];
+    Synth_Type type;
     uint32_t FLAGS;
     LFO_Module* lfo;
     pthread_mutex_t mutex;
     pthread_cond_t cond;
 } Synth;
 
-//Name can be 9 characters long
-Synth* synth_init(SoundController* sc, const char* name, uint16_t sampleRate, float frequency, uint32_t FLAGS);
+//Name can be 13 characters long
+Synth* synth_init(SoundController* sc, const char* name, Synth_Type type, uint16_t sampleRate, float frequency, uint32_t FLAGS);
 //if you want to generate some sound before starting the callback
 void synth_generate_audio(Synth* synth);
 // best to send in bpm_to_hert(bpm) to the frequency parameter
