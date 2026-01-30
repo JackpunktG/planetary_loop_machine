@@ -1,6 +1,5 @@
 #include "planetary_loop_machine/planetary_loop_machine.h"
 
-
 #define SAMPLE_RATE     44100
 #define CHANNEL_COUNT   2
 #define SAMPLE_FORMAT   ma_format_f32
@@ -30,6 +29,8 @@ void sanity_checks(SoundController* sc, InputController* ic)
 
 int main(int argc, char** argv)
 {
+    MIDI_Controller midiController;
+    midi_controller_set(&midiController, "src/audio_data/midi_commands_test.midi");
     // fining the context of the connected audio-interfaces
     ma_context context;
     if (ma_context_init(NULL, 0, NULL, &context) != MA_SUCCESS)
@@ -58,17 +59,19 @@ int main(int argc, char** argv)
     }
     */
     InputController ic = {0};
-    int i = input_controller_init(&ic, 20);
+    int i = input_controller_init(&ic, 16);
     printf("%d\n", i);
-    SoundController* s = sound_controller_init(122, "src/audio_data/song_1/", 4, 2, SAMPLE_RATE, CHANNEL_COUNT, SAMPLE_FORMAT, 3);
+    SoundController* s = sound_controller_init(122, "src/audio_data/song_1/", 4, 2, SAMPLE_RATE, CHANNEL_COUNT, SAMPLE_FORMAT, 3, &midiController);
     Synth* synth1 = synth_init(s, "synth1", SYNTH_TYPE_BASIC_SINEWAVE, SAMPLE_RATE, 440, SYNTH_ACTIVE);
     Synth* synth2 = synth_init(s, "synth2", SYNTH_TYPE_BASIC_SINEWAVE, SAMPLE_RATE, 2990, SYNTH_ACTIVE);
-    LFO_attach(s, synth2, LFO_TYPE_PHASE, 0.02, bpm_to_hz((float)122/2), LFO_MODULE_ACTIVE);
-    LFO_attach(s, synth2, LFO_TYPE_PHASE, 0.02, bpm_to_hz((float)122/4), LFO_MODULE_ACTIVE);
+    LFO_attach(s, synth2, LFO_TYPE_PHASE_MODULATION, 0.02, bpm_to_hz((float)122/2), LFO_MODULE_ACTIVE);
+    LFO_attach(s, synth2, LFO_TYPE_PHASE_MODULATION, 0.02, bpm_to_hz((float)122/4), LFO_MODULE_ACTIVE);
     Synth* synth3 = synth_init(s, "synth3", SYNTH_TYPE_BASIC_SINEWAVE, SAMPLE_RATE, 880, SYNTH_ACTIVE);
-    LFO_attach(s, synth3, LFO_TYPE_PHASE, 0.02, bpm_to_hz((float)122/2), LFO_MODULE_ACTIVE);
-    LFO_attach(s, synth2, LFO_TYPE_PHASE, 0.02, bpm_to_hz((float)122/8), LFO_MODULE_ACTIVE);
-    LFO_attach(s, synth1, LFO_TYPE_PHASE, 0.02, bpm_to_hz((float)122/2), LFO_MODULE_ACTIVE);
+    LFO_attach(s, synth3, LFO_TYPE_PHASE_MODULATION, 0.02, bpm_to_hz((float)122/2), LFO_MODULE_ACTIVE);
+    LFO_attach(s, synth2, LFO_TYPE_PHASE_MODULATION, 0.02, bpm_to_hz((float)122/8), LFO_MODULE_ACTIVE);
+    LFO_attach(s, synth1, LFO_TYPE_PHASE_MODULATION, 0.02, bpm_to_hz((float)122/2), LFO_MODULE_ACTIVE);
+    synth_print_out(s);
+
     s->activeCount = 0;
 
     /*

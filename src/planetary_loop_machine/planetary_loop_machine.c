@@ -1,4 +1,5 @@
 #include "planetary_loop_machine.h"
+
 #include "math.h"
 
 
@@ -74,7 +75,7 @@ Sample* sample_F32_load(SoundController* soundController, const char* filename, 
 }
 
 
-SoundController* sound_controller_init(float bpm, const char* loadDirectory, uint8_t beatsPerBar, uint8_t barsPerLoop, uint16_t sampleRate, uint8_t channelCount, ma_format format, uint8_t synthMax)
+SoundController* sound_controller_init(float bpm, const char* loadDirectory, uint8_t beatsPerBar, uint8_t barsPerLoop, uint16_t sampleRate, uint8_t channelCount, ma_format format, uint8_t synthMax, MIDI_Controller* midiController)
 {
     DIR *dir;
     struct dirent *entry;
@@ -94,6 +95,7 @@ SoundController* sound_controller_init(float bpm, const char* loadDirectory, uin
     SoundController* sController = arena_alloc(arena, sizeof(SoundController), NULL);
     memset(sController, 0, sizeof(SoundController));
     sController->arena = arena;
+    sController->midiController = midiController == NULL ? NULL : midiController;
     sController->sampleCount = sampleCount;
     sController->bpm = bpm;
     sController->activeCount = 0;
@@ -156,19 +158,32 @@ SoundController* sound_controller_init(float bpm, const char* loadDirectory, uin
         sController->synthCount = 0;
     }
 
-    printf("\nSuccessfully loading of session at %s - Sample rate: %u, Channels: %u, Format: %s, BPM: %0.2f, Beats per loop: %u (frames: %u)\nMemory for %u Synths\nSamples:\n",
+    printf(BOLD_CYAN "\nSuccessfully loading of session at %s - Sample rate: %u, Channels: %u, Format: %s, BPM: %0.2f, Beats per loop: %u (frames: %u)\n\n" RESET BOLD_MAGENTA "Memory for %u Synths\n\n"RESET BOLD_YELLOW "Samples:\n" RESET,
            loadDirectory, sampleRate, channelCount, formatStr, sController->bpm, (beatsPerBar * barsPerLoop) /2, sController->loopFrameLength, synthMax);
     for (uint32_t j = 0; j < sController->sampleCount; ++j)
-        printf("  %s (%u Sample Count - %u length in sec)\n", sController->samples[j]->name, sController->samples[j]->length,
+        printf(YELLOW "  %s (%u Sample Count - %u length in sec)\n" RESET, sController->samples[j]->name, sController->samples[j]->length,
                sController->samples[j]->length / sampleRate);
-
+    if (midiController != NULL)
+    {
+        printf(BOLD_GREEN "\nMidi Interface successfully attached. With Connection to channals:" RESET);
+        for(uint8_t i = 0; i < MIDI_MAX_CHANNELS; ++i)
+        {
+            if (midiController->active_channels & (1<<i))
+                printf(BOLD_GREEN " %u" RESET, i +1);
+        }
+        printf("\n\n");
+    }
     closedir(dir);
 
     return sController;
 }
 
+
+
 void sound_controller_destroy(SoundController* sc)
 {
+    if (sc->midiController != NULL)
+        midi_controller_destrory(sc->midiController);
     arena_destroy(sc->arena);
 }
 
@@ -264,6 +279,13 @@ void data_callback_f32(ma_device* pDevice, void* pOutput, const void* pInput, ma
         {
             printf("\r    Loop %u/%u        ", s->beatCount, 4);
             fflush(stdout);
+        }
+
+        //for MIDI_Clock
+        if (s->globalCursor % (s->loopFrameLength / (MIDI_TICKS_PER_BAR)) == 0 && s->midiController != NULL)
+        {
+            midi_command_clock(s->midiController);
+            //printf("clock\n");
         }
         ++s->globalCursor;
         if (s->globalCursor > s->loopFrameLength)
@@ -1334,7 +1356,7 @@ Synth* synth_init(SoundController* sc, const char* name, Synth_Type type, uint16
     return synth;
 }
 
-void LFO_attach(SoundController* sc, Synth* synth, LFO_Module_Type type, float intensity, float frequency, uint8_t FLAGS)
+void LFO_attach(SoundController* sc, Synth* synth, LFO_Module_Type type, float intensity, float frequency, uint32_t FLAGS)
 {
     LFO_Module* lfo = arena_alloc(sc->arena, sizeof(LFO_Module), NULL);
     lfo->type = type;
@@ -1401,7 +1423,7 @@ void basic_sinewave_synth_audio_generate(Synth* synth)
                 {
                     switch (lfo->type)
                     {
-                    case LFO_TYPE_PHASE:
+                    case LFO_TYPE_PHASE_MODULATION:
                         lfo->phase += lfo->phaseIncrement;
                         synth->phase += lfo->phase * lfo->intensity;
                         break;
@@ -1526,8 +1548,8 @@ const char* lfo_type_string(LFO_Module_Type type)
 {
     switch (type)
     {
-    case LFO_TYPE_PHASE:
-        return "Phase";
+    case LFO_TYPE_PHASE_MODULATION:
+        return "Phase Modulation";
     default:
         assert(false && "ERROR - Incorrect type info on LFO print out");
     }
@@ -1558,6 +1580,20 @@ void print_synth_lfo_info(Synth* synth)
     assert(saftey != 255 && "ERROR - print out lfo loop saftey triggered");
 }
 
-
+void synth_print_out(SoundController* sc)
+{
+    if (sc->synthCount > 0)
+    {
+        printf("\n");
+        for (uint8_t i = 0; i < sc->synthCount; ++i)
+        {
+            printf(BOLD_MAGENTA "\t\tSynth: %s channel:%d, Frequency: %0.f2, Volume: %0.2f\n" RESET, sc->synth[i]->name, i +1, sc->synth[i]->frequency, sc->synth[i]->volume);
+            print_synth_lfo_info(sc->synth[i]);
+        }
+        printf("\n");
+    }
+    else
+        printf(MAGENTA "\t\tNo Synths attached\n" RESET);
+}
 
 

@@ -14,6 +14,8 @@
 #include <termios.h>
 #include <assert.h>
 #include <ctype.h>
+#define MIDI_INTERFACE_IMPLEMENTATION
+#include "../../lib/MIDI_interface.h"
 
 #define END_MISSION -99
 #define MA_DEBUG_OUTPUT
@@ -65,24 +67,27 @@ typedef struct
     uint8_t synthCount;
     uint8_t synthMax;
     Synth** synth;
+    MIDI_Controller* midiController;
     Arena* arena;
 } SoundController;
 
 //Only vaild format is f32 thus far
-SoundController* sound_controller_init(float bpm, const char* loadDirectory, uint8_t beatsPerBar, uint8_t barsPerLoop, uint16_t sampleRate, uint8_t channelCount, ma_format format, uint8_t synthMax);
+//MIDI controller can be nulled to not active
+SoundController* sound_controller_init(float bpm, const char* loadDirectory, uint8_t beatsPerBar, uint8_t barsPerLoop, uint16_t sampleRate, uint8_t channelCount, ma_format format, uint8_t synthMax, MIDI_Controller* midiController);
 void data_callback_f32(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount);
 void sound_controller_destroy(SoundController* sc);
-
+void synth_print_out(SoundController* sc);
 //ran each loop to check status of one shot launched samples and reset their settings
 void one_shot_check(SoundController* sc);
 //generate for all attached synths
 void controller_synth_generate_audio(SoundController* sc);
 
+
 /* Synth */
 
 typedef enum
 {
-    LFO_TYPE_PHASE
+    LFO_TYPE_PHASE_MODULATION
 } LFO_Module_Type;
 #define LFO_MODULE_ACTIVE (1 << 0)
 
@@ -92,8 +97,7 @@ typedef struct LFO_Module
     double phaseIncrement;
     float intensity; //think like the volume of the LFO effect
     float frequency;
-    uint8_t FLAGS;
-    /* 3-byte hole */
+    uint32_t FLAGS;
     LFO_Module_Type type;
     LFO_Module* nextLFO;
 } LFO_Module;
@@ -132,7 +136,7 @@ Synth* synth_init(SoundController* sc, const char* name, Synth_Type type, uint16
 //if you want to generate some sound before starting the callback
 void synth_generate_audio(Synth* synth);
 // best to send in bpm_to_hert(bpm) to the frequency parameter
-void LFO_attach(SoundController* sc, Synth* synth, LFO_Module_Type type, float intensity, float frequency, uint8_t FLAGS);
+void LFO_attach(SoundController* sc, Synth* synth, LFO_Module_Type type, float intensity, float frequency, uint32_t FLAGS);
 
 // bpm to hertz converter function
 float bpm_to_hz(float bpm);
@@ -194,6 +198,3 @@ void input_controller_destroy(InputController* ic);
 void poll_keyboard(InputController* ic);
 int input_process(InputController* ic, SoundController* s);
 void slider_update(InputController* ic, SoundController* sc);
-
-
-
