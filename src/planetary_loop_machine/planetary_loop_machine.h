@@ -76,7 +76,7 @@ typedef struct
 SoundController* sound_controller_init(float bpm, const char* loadDirectory, uint8_t beatsPerBar, uint8_t barsPerLoop, uint16_t sampleRate, uint8_t channelCount, ma_format format, uint8_t synthMax, MIDI_Controller* midiController);
 void data_callback_f32(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount);
 void sound_controller_destroy(SoundController* sc);
-void synth_print_out(SoundController* sc);
+void process_midi_commands(SoundController* sc);
 //ran each loop to check status of one shot launched samples and reset their settings
 void one_shot_check(SoundController* sc);
 //generate for all attached synths
@@ -104,10 +104,15 @@ typedef struct LFO_Module
 
 typedef enum
 {
-    SYNTH_BUFFER_BEING_READ = (1 << 0),
-    SYNTH_ACTIVE            = (1 << 1)
+    SYNTH_ACTIVE            = (1 << 0),
+    SYNTH_NOTE_ON           = (1 << 1),
+    SYNTH_NOTE_OFF          = (1 << 2),
+    SYNTH_ATTACKING         = (1 << 3),
+    SYNTH_DECAYING          = (1 << 4),
+    SYNTH_WAITING_NOTE_ON   = (1 << 5)
 } Synth_FLAGS;
 
+#define SYNTH_BUFFER_BEING_READ (1 << 0)
 typedef enum
 {
     SYNTH_TYPE_BASIC_SINEWAVE
@@ -122,19 +127,26 @@ typedef struct Synth
     double phaseIncrement;
     float volume;
     float frequency;
+    float decayTime;
+    float decay_rate;
+    float attackTime;
+    float attack_rate;
+    float adjustment_rate; //will be used when attacking or decaying
     uint16_t sampleRate;
     char name[14];
     Synth_Type type;
-    uint32_t FLAGS;
+    uint8_t audio_thread_flags;
+    uint16_t FLAGS;
     LFO_Module* lfo;
     pthread_mutex_t mutex;
     pthread_cond_t cond;
 } Synth;
 
-//Name can be 13 characters long
-Synth* synth_init(SoundController* sc, const char* name, Synth_Type type, uint16_t sampleRate, float frequency, uint32_t FLAGS);
+//Name can be 12 characters long
+Synth* synth_init(SoundController* sc, const char* name, Synth_Type type, uint16_t sampleRate, float frequency, float attackTime, float decayTime, uint32_t FLAGS);
 //if you want to generate some sound before starting the callback
 void synth_generate_audio(Synth* synth);
+void synth_print_out(SoundController* sc);
 // best to send in bpm_to_hert(bpm) to the frequency parameter
 void LFO_attach(SoundController* sc, Synth* synth, LFO_Module_Type type, float intensity, float frequency, uint32_t FLAGS);
 

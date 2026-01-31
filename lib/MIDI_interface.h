@@ -30,33 +30,36 @@
 #include <stdio.h>
 #include <immintrin.h>
 
+
+#define MIDI_COMMAND_TYPE_BYTE_MASK 0xF0
 typedef enum
 {
-    /***************************************************** command byte                 data byte   date byte
-    ****************************************************** first 4bits channel(4bits)   (7bits)     (7bits)
-    ****************************************************** Hex   Binay  0-E             param1      param2 */
-    MIDI_NOTE_OFF = (1<<7),                             // 0x8 - 0b1000 0-E             key         velocity
-    MIDI_NOTE_ON = (1<<7)|(1<<4),                       // 0x9 - 0b1001 0-E             key         velocity
-    MIDI_AFTERTOUCH = (1<<7)|(1<<5),                    // 0xA - 0b1010 0-E             key         touch
-    MIDI_CONTINUOUS_CONTROLLER = (1<<7)|(1<<5)|(1<<4),  // 0xB - 0b1011 0-E             controller# controller Value
-    MIDI_PATCH_CHANGE = (1<<7)|(1<<6),                  // 0xC - 0b1100 0-E             instrument# instrument#
-    MIDI_CHANEL_PRESSURE = (1<<7)|(1<<6)|(1<<4),        // 0xD - 0b1101 0-E             pressure
-    MIDI_PITCH_BEND = (1<<7)|(1<<6)|(1<<5),             // 0xE - 0b1110 0-E             lsb(7bits)  msb(7bits)
-    MIDI_SYSTEM_MESSAGE = (1<<7)|(1<<6)|(1<<5)|(1<<4),  // 0xF - 0b1111 *uses channel for options
-    MIDI_COMMAND_INVALID = 0
+    /***************************************** command byte                 data byte   date byte
+    ****************************************** first 4bits channel(4bits)   (7bits)     (7bits)
+    ****************************************** Hex   Binay  0-E             param1      param2 */
+    MIDI_NOTE_OFF               = 0x80,     // 0x8 - 0b1000 0-E             key         velocity
+    MIDI_NOTE_ON                = 0x90,     // 0x9 - 0b1001 0-E             key         velocity
+    MIDI_AFTERTOUCH             = 0xA0,     // 0xA - 0b1010 0-E             key         touch
+    MIDI_CONTINUOUS_CONTROLLER  = 0xB0,     // 0xB - 0b1011 0-E             controller# controller Value
+    MIDI_PATCH_CHANGE           = 0xC0,     // 0xC - 0b1100 0-E             instrument# instrument#
+    MIDI_CHANEL_PRESSURE        = 0xD0,     // 0xD - 0b1101 0-E             pressure
+    MIDI_PITCH_BEND             = 0xE0,     // 0xE - 0b1110 0-E             lsb(7bits)  msb(7bits)
+    MIDI_SYSTEM_MESSAGE         = 0xF0,     // 0xF - 0b1111 *uses channel for options
+    MIDI_COMMAND_INVALID        = 0
 } MIDI_Command_type;
 
+#define MIDI_CHANNEL_BYTE_MASK 0x0F
 typedef enum
 {
-    MIDI_CHANNEL_1 = 0x0,
-    MIDI_CHANNEL_2 = 0x1,
-    MIDI_CHANNEL_3 = 0x2,
-    MIDI_CHANNEL_4 = 0x3,
-    MIDI_CHANNEL_5 = 0x4,
-    MIDI_CHANNEL_6 = 0x5,
-    MIDI_CHANNEL_7 = 0x6,
-    MIDI_CHANNEL_8 = 0x7,
-    MIDI_CHANNEL_9 = 0x8,
+    MIDI_CHANNEL_1  = 0x0,
+    MIDI_CHANNEL_2  = 0x1,
+    MIDI_CHANNEL_3  = 0x2,
+    MIDI_CHANNEL_4  = 0x3,
+    MIDI_CHANNEL_5  = 0x4,
+    MIDI_CHANNEL_6  = 0x5,
+    MIDI_CHANNEL_7  = 0x6,
+    MIDI_CHANNEL_8  = 0x7,
+    MIDI_CHANNEL_9  = 0x8,
     MIDI_CHANNEL_10 = 0x9,
     MIDI_CHANNEL_11 = 0xA,
     MIDI_CHANNEL_12 = 0xB,
@@ -64,7 +67,7 @@ typedef enum
     MIDI_CHANNEL_14 = 0xD,
     MIDI_CHANNEL_15 = 0xE,
     MIDI_CHANNEL_16 = 0xF,
-    MIDI_CHANNEL_INVALID = 0xFF
+    MIDI_CHANNEL_UNDEFINED
 } MIDI_Channels;
 
 typedef enum
@@ -133,14 +136,15 @@ MIDI_INLINE void midi_note_on(MIDI_Controller* controller, MIDI_Channels channel
 MIDI_INLINE void midi_note_off(MIDI_Controller* controller, MIDI_Channels channel);
 
 /* Helper functions */
+MIDI_INLINE void midi_command_byte_parse(uint8_t commmand_byte, uint8_t* out_type, uint8_t* out_channel);
 MIDI_INLINE float midi_note_to_frequence(uint8_t midi_note);
 MIDI_INLINE uint8_t midi_frequency_to_midi_note(float frequency);
 MIDI_INLINE void print_binary_32(uint32_t var_32);
 MIDI_INLINE void print_binary_16(uint16_t var_16);
 MIDI_INLINE void print_binary_8(uint8_t var_8);
 
-#endif // MIDI_INTERFACE_H
-#ifdef MIDI_INTERFACE_IMPLEMENTATION
+//#endif // MIDI_INTERFACE_H
+//#ifdef MIDI_INTERFACE_IMPLEMENTATION
 
 MIDI_INLINE void print_binary_32(uint32_t var_32)
 {
@@ -281,6 +285,7 @@ MIDI_INLINE void* midi_thread_loop(void* arg)
 
         midi_increment_step_count_simd(controller);
 
+
         //push processed commands
         if (controller->commands_processed > 0)
         {
@@ -393,7 +398,8 @@ MIDI_INLINE MIDI_Channels midi_channel_parse(const uint8_t channel)
     case 16:
         return MIDI_CHANNEL_16;
     default:
-        return MIDI_CHANNEL_INVALID;
+        assert(false && "ERROR - Invalid Channel parsed\n");
+        return MIDI_CHANNEL_UNDEFINED;
     }
 }
 
@@ -612,6 +618,12 @@ MIDI_INLINE void midi_controller_set(MIDI_Controller* controller, const char* fi
             --controller->midi_commands.loop_steps[i];
     }
 
+}
+
+MIDI_INLINE void midi_command_byte_parse(uint8_t commmand_byte, uint8_t* out_type, uint8_t* out_channel)
+{
+    *out_type = commmand_byte & MIDI_COMMAND_TYPE_BYTE_MASK;
+    *out_channel = commmand_byte & MIDI_CHANNEL_BYTE_MASK;
 }
 
 MIDI_INLINE void midi_command_clock(MIDI_Controller* controller)

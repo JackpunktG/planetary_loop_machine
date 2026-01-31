@@ -187,7 +187,7 @@ void sound_controller_destroy(SoundController* sc)
     arena_destroy(sc->arena);
 }
 
-void synth_buffer_being_read(Synth* synth);
+bool synth_buffer_being_read(Synth* synth);
 void synth_frames_read(Synth *synth);
 void data_callback_f32(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount)
 {
@@ -285,7 +285,7 @@ void data_callback_f32(ma_device* pDevice, void* pOutput, const void* pInput, ma
         if (s->globalCursor % (s->loopFrameLength / (MIDI_TICKS_PER_BAR)) == 0 && s->midiController != NULL)
         {
             midi_command_clock(s->midiController);
-            //printf("clock\n");
+            //printf("clock and command count: %u\n", s->midiController->command_count);
         }
         ++s->globalCursor;
         if (s->globalCursor > s->loopFrameLength)
@@ -297,9 +297,10 @@ void data_callback_f32(ma_device* pDevice, void* pOutput, const void* pInput, ma
         for (uint8_t i = 0; i < s->synthCount; ++i)
         {
             Synth* synth = s->synth[i];
+            if(!synth_buffer_being_read(synth))
+                continue;
             float volume = synth->volume;
             pushedFrames = 0;
-            synth_buffer_being_read(synth);
 
             while(pushedFrames < frameCount * channelCount)
             {
@@ -1329,15 +1330,18 @@ void one_shot_check(SoundController* sc)
 #define TWO_PI (2.0 * PI)
 
 void synth_audio_buffer_init(Synth* synth);
-Synth* synth_init(SoundController* sc, const char* name, Synth_Type type, uint16_t sampleRate, float frequency, uint32_t FLAGS)
+Synth* synth_init(SoundController* sc, const char* name, Synth_Type type, uint16_t sampleRate, float frequency, float attackTime, float decayTime, uint32_t FLAGS)
 {
     Synth* synth = arena_alloc(sc->arena, sizeof(Synth), NULL);
     memset(synth, 0, sizeof(Synth));
     synth->bufferMax = sampleRate * 2; //for 1 sec of audio buffer as we take 2 channels
-    strncpy(synth->name, name, 13);
+    strncpy(synth->name, name, 12);
     synth->sampleRate = sampleRate;
     synth->type = type;
     synth->FLAGS = FLAGS;
+    synth->decayTime = decayTime;
+    synth->attackTime = attackTime;
+    synth->audio_thread_flags = 0;
     synth->cursor = 0;
     synth->frequency = frequency;
     synth->phase = 0.0f;
@@ -1390,19 +1394,28 @@ void LFO_attach(SoundController* sc, Synth* synth, LFO_Module_Type type, float i
     }
 }
 
-// Called by audio callback before reading buffer
-void synth_buffer_being_read(Synth* synth)
+// Called by audio callback before reading buffer true if synth active false is not
+bool synth_buffer_being_read(Synth* synth)
 {
     pthread_mutex_lock(&synth->mutex);
-    synth->FLAGS |= SYNTH_BUFFER_BEING_READ;
-    pthread_mutex_unlock(&synth->mutex);
+    if (synth->FLAGS & SYNTH_ACTIVE)
+    {
+        synth->audio_thread_flags |= SYNTH_BUFFER_BEING_READ;
+        pthread_mutex_unlock(&synth->mutex);
+        return true;
+    }
+    else
+    {
+        pthread_mutex_unlock(&synth->mutex);
+        return false;
+    }
 }
 
 // Called by audio callback after reading buffer
 void synth_frames_read(Synth *synth)
 {
     pthread_mutex_lock(&synth->mutex);
-    synth->FLAGS &= ~SYNTH_BUFFER_BEING_READ;
+    synth->audio_thread_flags &= ~SYNTH_BUFFER_BEING_READ;
     pthread_cond_signal(&synth->cond);
     pthread_mutex_unlock(&synth->mutex);
 }
@@ -1444,12 +1457,51 @@ void basic_sinewave_synth_audio_generate(Synth* synth)
             assert(saftey != 255 && "WARNING - saftey used to stop lfo loop");
         }
 
-        synth->buffer[i] = sin(toGenPhase) * 0.05; // *0.05 to get the sound down in line with other sample
-        if (i + 1 < synth->bufferMax)
-            synth->buffer[++i] = sin(toGenPhase) * 0.05; // generating the same sample for both frames
+        if (synth->FLAGS & SYNTH_DECAYING)
+        {
+            synth->buffer[i] = (sin(toGenPhase) * 0.05) * synth->adjustment_rate;
+            if (i + 1 < synth->bufferMax)
+                synth->buffer[++i] = (sin(toGenPhase) * 0.05) * synth->adjustment_rate;
+            else
+                printf("WARNING - Odd number of frames generated\n");
+
+            synth->adjustment_rate -= synth->decay_rate;
+            if (synth->adjustment_rate < 0)
+            {
+                synth->FLAGS &= ~SYNTH_DECAYING;
+                synth->FLAGS |= SYNTH_WAITING_NOTE_ON;
+            }
+        }
+        else if (synth->FLAGS & SYNTH_WAITING_NOTE_ON)
+        {
+            synth->buffer[i] = 0;
+            if (i + 1 < synth->bufferMax)
+                synth->buffer[++i] = 0;
+            else
+                printf("WARNING - Odd number of frames generated\n");
+        }
+        else if (synth->FLAGS & SYNTH_ATTACKING)
+        {
+            synth->buffer[i] = (sin(toGenPhase) * 0.05) * synth->adjustment_rate; // *0.05 to get the sound down in line with other sample
+            if (i + 1 < synth->bufferMax)
+                synth->buffer[++i] = (sin(toGenPhase) * 0.05) * synth->adjustment_rate; // generating the same sample for both frames
+            else
+                printf("WARNING - Odd number of frames generated\n");
+
+            synth->adjustment_rate += synth->attack_rate;
+            if (synth->adjustment_rate > 1)
+            {
+                synth->FLAGS &= ~SYNTH_ATTACKING;
+            }
+        }
         else
-            printf("WARNING - Odd number of frames generated\n");
-
+        {
+            synth->buffer[i] = sin(toGenPhase) * 0.05; // *0.05 to get the sound down in line with other sample
+            if (i + 1 < synth->bufferMax)
+                synth->buffer[++i] = sin(toGenPhase) * 0.05; // generating the same sample for both frames
+            else
+                printf("WARNING - Odd number of frames generated\n");
+        }
         synth->phase += synth->phaseIncrement;
 
         //printf("before lfo: %f. phase: %f\n", synth->lfo, synth->phase);
@@ -1458,36 +1510,6 @@ void basic_sinewave_synth_audio_generate(Synth* synth)
             synth->phase -= TWO_PI;
     }
 
-}
-
-void synth_audio_buffer_init(Synth* synth)
-{
-    synth->phaseIncrement = TWO_PI * synth->frequency / synth->sampleRate;
-
-    pthread_mutex_lock(&synth->mutex);  // Lock before checking
-
-    while (synth->FLAGS & SYNTH_BUFFER_BEING_READ)
-        pthread_cond_wait(&synth->cond, &synth->mutex); // Wait if being currently read
-
-
-    for (uint32_t i = 0; i < synth->bufferMax; ++i)
-    {
-        synth->buffer[i] = sin(synth->phase) * 0.05; // *0.05 to get the sound down in line with other sampl
-        synth->buffer[++i] = sin(synth->phase) * 0.05; // generating the same sample for both frames
-
-        // Lfo
-        synth->phase += synth->phaseIncrement;
-
-        //printf("before lfo: %f. phase: %f\n", synth->lfo, synth->phase);
-        // Wrap phase to prevent accumulation errors - keep phase in range [0, 2π]
-        if (synth->phase >= TWO_PI)
-            synth->phase -= TWO_PI;
-
-    }
-    synth->cursor = 0;
-    //printf("lfo: %f. phase: %f\n", synth->lfo, synth->phase);
-
-    pthread_mutex_unlock(&synth->mutex);  // Unlock when done
 }
 
 void controller_synth_generate_audio(SoundController* sc)
@@ -1502,18 +1524,41 @@ void controller_synth_generate_audio(SoundController* sc)
 void synth_generate_audio(Synth* synth)
 {
     assert(synth != NULL);
-    if (synth->cursor == 0 || !(synth->FLAGS & SYNTH_ACTIVE)) // Only entering if samples need to be generated or synth is currently active
+    if (!(synth->FLAGS & SYNTH_ACTIVE)) // Only entering synth is currently active
         return;
 
-    synth->phaseIncrement = TWO_PI * synth->frequency / synth->sampleRate;
 
     pthread_mutex_lock(&synth->mutex);  // Lock before checking
 
-    while (synth->FLAGS & SYNTH_BUFFER_BEING_READ)
+    while (synth->audio_thread_flags & SYNTH_BUFFER_BEING_READ)
         pthread_cond_wait(&synth->cond, &synth->mutex); // Wait if being currently read
 
-    memmove(synth->buffer, synth->buffer + synth->cursor, sizeof(float) * (synth->bufferMax - synth->cursor));
+    if (synth->FLAGS & SYNTH_NOTE_ON)
+    {
+        synth->cursor = synth->bufferMax;
+        synth->FLAGS &= ~(SYNTH_NOTE_ON | SYNTH_WAITING_NOTE_ON);
+        synth->FLAGS |= SYNTH_ATTACKING;
+        synth->attack_rate = 1.0f / (synth->attackTime * synth->sampleRate);
+        synth->adjustment_rate = 0.0f;
+        if (synth->attack_rate <= 0.0f)
+            synth->attack_rate = 0.000001f;
+        printf("attack rate: %f\n", synth->attack_rate);
+        printf("adjustment rate: %f\n", synth->adjustment_rate);
+    }
+    else
+        memmove(synth->buffer, synth->buffer + synth->cursor, sizeof(float) * (synth->bufferMax - synth->cursor));
 
+    if (synth->FLAGS & SYNTH_NOTE_OFF)
+    {
+        synth->FLAGS &= ~SYNTH_NOTE_OFF;
+        synth->FLAGS |= SYNTH_DECAYING;
+        synth->decay_rate = 1.0f / (synth->decayTime * synth->sampleRate);
+        synth->adjustment_rate = 1.0f;
+        if (synth->decay_rate <= 0.0f)
+            synth->decay_rate = 0.000001f;
+    }
+
+    synth->phaseIncrement = TWO_PI * synth->frequency / synth->sampleRate;
     switch (synth->type)
     {
     case SYNTH_TYPE_BASIC_SINEWAVE:
@@ -1597,3 +1642,77 @@ void synth_print_out(SoundController* sc)
 }
 
 
+/* MIDI_INTERFACE implmentation */
+void note_off(SoundController* sc, uint8_t channel)
+{
+    assert(channel < sc->synthCount);
+    Synth* synth = sc->synth[channel];
+    if (!(synth->FLAGS & SYNTH_ACTIVE))
+    {
+        printf("WARNING - Synth %u is Deactive\n", channel +1);
+        return;
+    }
+    synth->FLAGS |= SYNTH_NOTE_OFF;
+    //printf("MIDI NOTE OFF synth: %u\n", channel +1);
+
+}
+
+void note_on(SoundController* sc, uint8_t channel, uint8_t key, uint8_t velocity)
+{
+    assert(channel < sc->synthCount);
+    Synth* synth = sc->synth[channel];
+    if(synth->FLAGS & SYNTH_NOTE_ON)
+        printf("WARNING - Synth %u is already Deactive\n", channel +1);
+
+    synth->frequency = midi_note_to_frequence(key);
+    //synth->velocity = velocity;
+    synth->FLAGS |= SYNTH_NOTE_ON;
+    //printf("MIDI NOTE ON synth %u\n", channel +1);
+
+}
+
+void process_midi_commands(SoundController* sc)
+{
+    if (sc->midiController->command_count == 0)
+        return;
+
+    pthread_mutex_lock(&sc->midiController->mutex);
+
+    //printf("Commands to process: %u\n", sc->midiController->command_count);
+
+    for(uint8_t i = sc->midiController->commands_processed; i < sc->midiController->command_count; ++i)
+    {
+        //? Perhaps save all the commands first and then release the lock?
+        MIDI_Command command = sc->midiController->commands[i];
+
+        uint8_t command_nibble = 0;
+        uint8_t channel = 0;
+        midi_command_byte_parse(command.command_byte, &command_nibble, &channel);
+        switch(command_nibble)
+        {
+        case MIDI_SYSTEM_MESSAGE:
+            if (command.command_byte == (MIDI_SYSTEM_MESSAGE | MIDI_CLOCK))
+                ;
+            else
+                printf("WARNING - MIDI system message not recognised\n");
+            break;
+        case MIDI_NOTE_OFF:
+            note_off(sc, channel);
+            break;
+        case MIDI_NOTE_ON:
+            note_on(sc, channel, command.param1, command.param2);
+            break;
+        case MIDI_AFTERTOUCH:
+        case MIDI_CONTINUOUS_CONTROLLER:
+        case MIDI_PATCH_CHANGE:
+        case MIDI_CHANEL_PRESSURE:
+        case MIDI_PITCH_BEND:
+            printf("WARNING - midi command not yet implmented\n");
+            break;
+        default:
+            assert(false && "ERROR - unknown MIDI command\n");
+        }
+        ++sc->midiController->commands_processed;
+    }
+    pthread_mutex_unlock(&sc->midiController->mutex);
+}

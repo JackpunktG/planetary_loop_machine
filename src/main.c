@@ -62,14 +62,14 @@ int main(int argc, char** argv)
     int i = input_controller_init(&ic, 16);
     printf("%d\n", i);
     SoundController* s = sound_controller_init(122, "src/audio_data/song_1/", 4, 2, SAMPLE_RATE, CHANNEL_COUNT, SAMPLE_FORMAT, 3, &midiController);
-    Synth* synth1 = synth_init(s, "synth1", SYNTH_TYPE_BASIC_SINEWAVE, SAMPLE_RATE, 440, SYNTH_ACTIVE);
-    Synth* synth2 = synth_init(s, "synth2", SYNTH_TYPE_BASIC_SINEWAVE, SAMPLE_RATE, 2990, SYNTH_ACTIVE);
-    LFO_attach(s, synth2, LFO_TYPE_PHASE_MODULATION, 0.02, bpm_to_hz((float)122/2), LFO_MODULE_ACTIVE);
-    LFO_attach(s, synth2, LFO_TYPE_PHASE_MODULATION, 0.02, bpm_to_hz((float)122/4), LFO_MODULE_ACTIVE);
-    Synth* synth3 = synth_init(s, "synth3", SYNTH_TYPE_BASIC_SINEWAVE, SAMPLE_RATE, 880, SYNTH_ACTIVE);
-    LFO_attach(s, synth3, LFO_TYPE_PHASE_MODULATION, 0.02, bpm_to_hz((float)122/2), LFO_MODULE_ACTIVE);
-    LFO_attach(s, synth2, LFO_TYPE_PHASE_MODULATION, 0.02, bpm_to_hz((float)122/8), LFO_MODULE_ACTIVE);
-    LFO_attach(s, synth1, LFO_TYPE_PHASE_MODULATION, 0.02, bpm_to_hz((float)122/2), LFO_MODULE_ACTIVE);
+    Synth* synth1 = synth_init(s, "synth1", SYNTH_TYPE_BASIC_SINEWAVE, SAMPLE_RATE, 440, 0.5f, 1.0f, SYNTH_ACTIVE);
+    //Synth* synth2 = synth_init(s, "synth2", SYNTH_TYPE_BASIC_SINEWAVE, SAMPLE_RATE, 2990, SYNTH_ACTIVE);
+    //LFO_attach(s, synth2, LFO_TYPE_PHASE_MODULATION, 0.02, bpm_to_hz((float)122/2), LFO_MODULE_ACTIVE);
+    //LFO_attach(s, synth2, LFO_TYPE_PHASE_MODULATION, 0.02, bpm_to_hz((float)122/4), LFO_MODULE_ACTIVE);
+    //Synth* synth3 = synth_init(s, "synth3", SYNTH_TYPE_BASIC_SINEWAVE, SAMPLE_RATE, 880, SYNTH_ACTIVE);
+    //LFO_attach(s, synth3, LFO_TYPE_PHASE_MODULATION, 0.02, bpm_to_hz((float)122/2), LFO_MODULE_ACTIVE);
+    //LFO_attach(s, synth2, LFO_TYPE_PHASE_MODULATION, 0.02, bpm_to_hz((float)122/8), LFO_MODULE_ACTIVE);
+    //LFO_attach(s, synth1, LFO_TYPE_PHASE_MODULATION, 0.02, bpm_to_hz((float)122/2), LFO_MODULE_ACTIVE);
     synth_print_out(s);
 
     s->activeCount = 0;
@@ -138,6 +138,7 @@ int main(int argc, char** argv)
     bool running = true;
     while (running)
     {
+        process_midi_commands(s);
         controller_synth_generate_audio(s);
         poll_keyboard(&ic);
 
