@@ -1328,6 +1328,7 @@ void one_shot_check(SoundController* sc)
 
 #define PI 3.14159265358979323846
 #define TWO_PI (2.0 * PI)
+#define ATTACK_OR_DECAY_FINISHED -999.9f
 
 void synth_audio_buffer_init(Synth* synth);
 Synth* synth_init(SoundController* sc, const char* name, Synth_Type type, uint16_t sampleRate, float frequency, float attackTime, float decayTime, uint32_t FLAGS)
@@ -1341,6 +1342,8 @@ Synth* synth_init(SoundController* sc, const char* name, Synth_Type type, uint16
     synth->FLAGS = FLAGS;
     synth->decayTime = decayTime;
     synth->attackTime = attackTime;
+    synth->velocity = VELOCITY_WEIGHTING_NEUTRAL;
+    synth->adjustment_rate = ATTACK_OR_DECAY_FINISHED;
     synth->audio_thread_flags = 0;
     synth->cursor = 0;
     synth->frequency = frequency;
@@ -1470,15 +1473,8 @@ void basic_sinewave_synth_audio_generate(Synth* synth)
             {
                 synth->FLAGS &= ~SYNTH_DECAYING;
                 synth->FLAGS |= SYNTH_WAITING_NOTE_ON;
+                synth->adjustment_rate = ATTACK_OR_DECAY_FINISHED;
             }
-        }
-        else if (synth->FLAGS & SYNTH_WAITING_NOTE_ON)
-        {
-            synth->buffer[i] = 0;
-            if (i + 1 < synth->bufferMax)
-                synth->buffer[++i] = 0;
-            else
-                printf("WARNING - Odd number of frames generated\n");
         }
         else if (synth->FLAGS & SYNTH_ATTACKING)
         {
@@ -1492,7 +1488,16 @@ void basic_sinewave_synth_audio_generate(Synth* synth)
             if (synth->adjustment_rate > 1)
             {
                 synth->FLAGS &= ~SYNTH_ATTACKING;
+                synth->adjustment_rate = ATTACK_OR_DECAY_FINISHED;
             }
+        }
+        else if (synth->FLAGS & SYNTH_WAITING_NOTE_ON)
+        {
+            synth->buffer[i] = 0;
+            if (i + 1 < synth->bufferMax)
+                synth->buffer[++i] = 0;
+            else
+                printf("WARNING - Odd number of frames generated\n");
         }
         else
         {
@@ -1538,8 +1543,8 @@ void synth_generate_audio(Synth* synth)
         synth->cursor = synth->bufferMax;
         synth->FLAGS &= ~(SYNTH_NOTE_ON | SYNTH_WAITING_NOTE_ON);
         synth->FLAGS |= SYNTH_ATTACKING;
-        synth->attack_rate = 1.0f / (synth->attackTime * synth->sampleRate);
-        synth->adjustment_rate = 0.0f;
+        synth->attack_rate = ((1.0f / (synth->attackTime * synth->sampleRate)) * ((float)synth->velocity / VELOCITY_WEIGHTING_NEUTRAL));
+        synth->adjustment_rate = synth->adjustment_rate == ATTACK_OR_DECAY_FINISHED ? 0.0f : synth->adjustment_rate;
         if (synth->attack_rate <= 0.0f)
             synth->attack_rate = 0.000001f;
         printf("attack rate: %f\n", synth->attack_rate);
@@ -1553,9 +1558,11 @@ void synth_generate_audio(Synth* synth)
         synth->FLAGS &= ~SYNTH_NOTE_OFF;
         synth->FLAGS |= SYNTH_DECAYING;
         synth->decay_rate = 1.0f / (synth->decayTime * synth->sampleRate);
-        synth->adjustment_rate = 1.0f;
+        synth->adjustment_rate = synth->adjustment_rate == ATTACK_OR_DECAY_FINISHED ? 1.0f : synth->adjustment_rate;
         if (synth->decay_rate <= 0.0f)
             synth->decay_rate = 0.000001f;
+        printf("adjustment rate: %f\n", synth->adjustment_rate);
+        printf("decay_rate: %f\n", synth->decay_rate);
     }
 
     synth->phaseIncrement = TWO_PI * synth->frequency / synth->sampleRate;
@@ -1653,6 +1660,7 @@ void note_off(SoundController* sc, uint8_t channel)
         return;
     }
     synth->FLAGS |= SYNTH_NOTE_OFF;
+    synth->FLAGS &= ~SYNTH_ATTACKING; // incase the note is still attacking
     //printf("MIDI NOTE OFF synth: %u\n", channel +1);
 
 }
@@ -1665,8 +1673,9 @@ void note_on(SoundController* sc, uint8_t channel, uint8_t key, uint8_t velocity
         printf("WARNING - Synth %u is already Deactive\n", channel +1);
 
     synth->frequency = midi_note_to_frequence(key);
-    //synth->velocity = velocity;
+    synth->velocity = velocity;
     synth->FLAGS |= SYNTH_NOTE_ON;
+    synth->FLAGS &= ~SYNTH_DECAYING; // incase the note is still decaying
     //printf("MIDI NOTE ON synth %u\n", channel +1);
 
 }

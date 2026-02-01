@@ -109,7 +109,7 @@ typedef enum
     SYNTH_NOTE_OFF          = (1 << 2),
     SYNTH_ATTACKING         = (1 << 3),
     SYNTH_DECAYING          = (1 << 4),
-    SYNTH_WAITING_NOTE_ON   = (1 << 5)
+    SYNTH_WAITING_NOTE_ON   = (1 << 5) // outputting no sound, but the phase and LFO logic is still being updated
 } Synth_FLAGS;
 
 #define SYNTH_BUFFER_BEING_READ (1 << 0)
@@ -118,6 +118,7 @@ typedef enum
     SYNTH_TYPE_BASIC_SINEWAVE
 } Synth_Type;
 
+#define VELOCITY_WEIGHTING_NEUTRAL 64
 typedef struct Synth
 {
     float* buffer;
@@ -136,7 +137,8 @@ typedef struct Synth
     char name[14];
     Synth_Type type;
     uint8_t audio_thread_flags;
-    uint16_t FLAGS;
+    uint8_t velocity; // used for midi input, (0 - 127) At VELOCITY_WEIGHTING_NEUTRAL will be the attackTime set, higher or lower will just accordingly
+    uint32_t FLAGS;
     LFO_Module* lfo;
     pthread_mutex_t mutex;
     pthread_cond_t cond;
